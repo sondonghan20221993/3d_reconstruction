@@ -15,7 +15,7 @@
   ↓
 2DGS 학습
   ↓
-SuGaR (mesh 추출 → refinement)
+mesh 추출 (2DGS 자체 or SuGaR)
   ↓
 최종 mesh (텍스처 포함)
 ```
@@ -32,16 +32,29 @@ hloc (SuperPoint+LightGlue) → COLMAP
 공통 후반 파이프라인
 ```
 
-### 실험 B (비교) — MASt3R-SfM
+### 실험 B (비교) — MASt3R-SfM ✅ 진행 중
 
 ```
 이미지 200~300장 (동일 이미지셋)
   ↓
-MASt3R-SfM
+MASt3R-SfM ✅ 완료 (2026-06-14)
   ↓
-카메라 pose + dense point cloud
+카메라 pose + dense point cloud ✅ 완료
+  - poses.npy (68, 4, 4)
+  - focals.npy (68,) — shared focal = 261.83px
+  - pointcloud.ply (2,366,187 포인트)
   ↓
-공통 후반 파이프라인 (동일 코드 재사용)
+COLMAP 형식 변환 ✅ 완료
+  - colmap_input/sparse/0/{cameras,images,points3D}.txt
+  ↓
+2DGS 학습 ✅ 완료 (30,000 iter)
+  - 출력: ~/Desktop/data/experiment_B/2dgs_output/
+  ↓
+mesh 추출 ← 현재 단계
+  - [ ] 방법 1: 2DGS 자체 extract_mesh.py
+  - [ ] 방법 2: SuGaR (텍스처 포함)
+  ↓
+최종 mesh 시각적 검토
 ```
 
 ### 비교 변수
@@ -76,7 +89,7 @@ MASt3R-SfM
 | 2DGS | `~/Desktop/2d-gaussian-splatting` | setup.py로 빌드 |
 | SuGaR | `~/Desktop/SuGaR` | nvdiffrast 포함 |
 | MASt3R | `~/Desktop/MAST3R_2` | PYTHONPATH 등록 |
-| MASt3R checkpoint | `~/Desktop/MAST3R_2/checkpoints/` | DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth |
+| MASt3R checkpoint | `~/Desktop/MAST3R_2/checkpoints/` | MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth |
 
 ---
 
@@ -98,25 +111,55 @@ export PYTHONPATH=$PYTHONPATH:~/Desktop/MAST3R_2:~/Desktop/MAST3R_2/dust3r
 | 항목 | 내용 |
 |------|------|
 | .bashrc 문법 오류 | 3번째 줄 오류로 `source ~/.bashrc` 실패 → 매 셸 시작 시 `source /home/sdh/miniforge3/etc/profile.d/conda.sh` 수동 실행 필요 |
-| numpy 버전 | `<2`로 고정 (2DGS 빌드 시 다운그레이드) → opencv-python 충돌 가능성 있으나 현재 무시 |
+| numpy 버전 | `<2`로 고정 (2DGS 빌드 시 다운그레이드) → opencv-python / plyfile 충돌 경고 있으나 무시 |
 | MASt3R 설치 | setup.py/pyproject.toml 없는 구버전 → PYTHONPATH로 해결 |
+| nano 붙여넣기 | 들여쓰기 자동 추가 버그 → heredoc 후 `sed -i 's/^  //' 파일명` 으로 해결 |
 
 ---
 
-## 디렉토리 구조 (권장)
+## 디렉토리 구조 (정리 후)
 
+### 명명 규칙
 ```
-3d_reconstruction/
-├── images/                  # 원본 이미지 200~300장
-├── experiment_A/
-│   ├── colmap_output/       # pose + sparse point cloud
-│   ├── 2dgs_output/         # .ply
-│   └── sugar_output/        # mesh .obj/.glb
-├── experiment_B/
-│   ├── mast3r_output/       # pose + dense point cloud
-│   ├── 2dgs_output/         # .ply
-│   └── sugar_output/        # mesh .obj/.glb
-└── experiment_design_summary.md
+experiments/{데이터셋}__{SfM방법}__{렌더러}/
+```
+
+### 전체 구조
+```
+~/Desktop/data/
+├── datasets/
+│   └── orbit34/                              # 원본 데이터셋
+│       ├── rgb/                              # 이미지 68장 (1920x1080)
+│       ├── meta/
+│       └── manifest.json
+└── experiments/
+    └── orbit34__mast3r__2dgs/               # 실험 B
+        ├── 01_sfm/                          # MASt3R-SfM 결과
+        │   ├── poses.npy
+        │   ├── focals.npy
+        │   ├── pointcloud.ply
+        │   └── cache/
+        ├── 02_colmap/                       # COLMAP 변환 결과
+        │   ├── sparse/0/
+        │   │   ├── cameras.txt
+        │   │   ├── images.txt
+        │   │   └── points3D.txt
+        │   └── images/                      # 심볼릭 링크
+        ├── 03_gaussian/                     # 2DGS 학습 결과
+        └── 04_mesh/                         # mesh 추출 결과
+            ├── 2dgs_mesh.ply                # 2DGS TSDF mesh
+            └── sugar_mesh/                  # SuGaR mesh (예정)
+
+~/Desktop/MAST3R_2/
+├── run_mast3r_sfm.py                        # MASt3R-SfM 실행 스크립트
+└── mast3r_to_colmap.py                      # COLMAP 변환 스크립트
+```
+
+### 실험 추가 시 예시
+```
+experiments/
+├── orbit34__mast3r__2dgs/                   # 실험 B (현재)
+└── orbit34__hloc_colmap__2dgs/              # 실험 A (예정)
 ```
 
 ---
@@ -124,23 +167,14 @@ export PYTHONPATH=$PYTHONPATH:~/Desktop/MAST3R_2:~/Desktop/MAST3R_2/dust3r
 ## 다음 단계
 
 ```
-Step 1  이미지 준비 (서버에 업로드)
+Step 1 (완료) MASt3R-SfM → pose + point cloud
+Step 2 (완료) COLMAP 형식 변환
+Step 3 (완료) 2DGS 학습 (30,000 iter)
+Step 4 (진행 중) mesh 추출
+        방법 1: 2DGS extract_mesh.py
+        방법 2: SuGaR (coarse → refine → 텍스처)
+        → 두 결과 시각적 비교
 
-Step 2  실험 A 실행
-        hloc feature matching
-          → COLMAP pose 추정
-          → 2DGS 학습
-          → SuGaR mesh 추출 + refinement
-          → 최종 mesh 시각적 검토
-
-Step 3  실험 B 실행
-        MASt3R-SfM으로 pose + point cloud 생성
-          → 이후 2DGS / SuGaR는 실험 A와 동일 설정 재사용
-          → 최종 mesh 시각적 검토
-
-Step 4  두 실험 결과 비교
-        - 텍스처 선명도
-        - 표면 노이즈 / 구멍 유무
-        - artifact 유무
-        - 전반적 완성도
+Step 5 (예정) 실험 A (hloc+COLMAP) 동일 파이프라인 실행
+Step 6 (예정) A vs B 최종 결과 비교
 ```
