@@ -10,14 +10,19 @@
 |------|----------|--------|-----------|-----------|
 | 공통 prior (MASt3R-SfM) | `venv-mast3r` | `source ~/Desktop/venv-mast3r/bin/activate` | MASt3R-SfM 포즈/점군 추정 (`run_mast3r_sfm.py`) | `~/Desktop/MAST3R_2` |
 | ① 점맵→메시 | `venv-pointmap` | `source ~/Desktop/venv-pointmap/bin/activate` | MASt3R pointmap → Poisson/BPA 메싱 | `~/Desktop/MAST3R_2` |
-| ② **MeshSplatting→메시** ⭐ | `venv-meshsplat` | `source ~/Desktop/venv-meshsplat/bin/activate` | **MeshSplatting 학습** (Opaque Triangle + Differentiable Rendering, **CVPR 2026 SOTA**) | `~/Desktop/mesh-splatting` |
+| ② **MeshSplatting→메시** ⭐ | `venv-meshsplat10` (Python 3.10) | `source ~/Desktop/venv-meshsplat10/bin/activate` | **MeshSplatting 학습** (Opaque Triangle + Differentiable Rendering, **CVPR 2026 SOTA**) | `~/Desktop/mesh-splatting` |
 | ③ (폐기) | ❌ | — | ~~Neuralangelo 학습~~ (취소 2026-06-17, 학습 시간 너무 김) | — |
 | ⭐ MILo→메시 (선택) | `venv-milo` | `source ~/Desktop/venv-milo/bin/activate` | MILo 학습 (비교 baseline용, SIGGRAPH Asia 2025) | `~/Desktop/milo` |
 
 > **2026-06-17 전략 변경:**
-> - `venv-meshsplat` (신규): **MeshSplatting (CVPR 2026 SOTA)** 로 확정. MILo/SDF 중심에서 MeshSplatting 중심으로 전환.
+> - `venv-meshsplat10` (2026-06-19 재구성, Python 3.10): **MeshSplatting (CVPR 2026 SOTA)** 환경 완성. 기존 `venv-meshsplat`(Python 3.8)은 effrdel Python>=3.9 요구로 폐기.
 > - SDF 갈래 (Neuralangelo) 완전 폐기: 학습 시간 36배 차이 (29h vs 48m), 성능도 MeshSplatting이 우수 (F1 0.728 > 0.70)
 > - MILo는 선택적 비교 baseline으로 변경 (필수 → 선택사항)
+
+> **2026-06-19 실험 결과 추가:**
+> - MeshSplatting blue_1 FHD 실행 결과 **메시 파편화 (결과 불량)**. PSNR 21.4dB.
+> - 원인: 단색 박스에서 Photometric Loss ≈ 0 → 기하 gradient 없음 (→ 사례 A 참조)
+> - **GS 기반 메시 추출은 이 데이터셋(단색 object-centric)에 구조적으로 부적합**으로 결론.
 
 ### 각 venv 활성화 후 필수 환경변수 (매번 설정)
 
@@ -94,14 +99,42 @@ export PYTHONPATH=$PYTHONPATH:~/Desktop/MAST3R_2:~/Desktop/MAST3R_2/dust3r
 - repo: `~/Desktop/MAST3R_2` (PYTHONPATH로 등록: `~/Desktop/MAST3R_2:~/Desktop/MAST3R_2/dust3r`)
 - 기존 conda `recon3d`는 torch/numpy/torchvision 파일 손상으로 복구 단념, 그대로 보존(미사용)
 
-### venv-meshsplat 설치 목록 **[신규, 2026-06-17]**
+### venv-meshsplat10 설치 목록 **[2026-06-19 재구성, Python 3.10]**
+- **Python 3.10** 필수 (effrdel이 Python>=3.9 요구, 기존 venv-meshsplat Python 3.8 폐기)
 - torch 2.1.2+cu121, torchvision 0.16.2
-- numpy 1.26.4 (고정)
-- tinycuda, nvdiff, rasterization 관련 CUDA 확장 (CVPR 2026 논문 기반, --no-build-isolation)
-- opencv-python, scipy, trimesh, open3d, pillow, imageio 등
-- _lzma.so (conda recon3d에서 복사)
-- repo: `~/Desktop/mesh-splatting` (공식 MeshSplatting GitHub: meshsplatting/mesh-splatting)
-- PYTHONPATH: (기본값 OK, 코드 repo root에서 실행)
+- numpy 1.26.4 고정 (`<2` 필수, torch 2.1.2가 numpy 1.x로 컴파일됨)
+- CUDA 확장 (`--no-build-isolation`, `unset LD_LIBRARY_PATH` 후):
+  - `diff-triangle-mesh-rasterization` (submodules/)
+  - `simple-knn` (submodules/)
+  - `effrdel` (submodules/) — `pip install .`
+- ⚠️ effrdel의 `tetutils.py`, `intersect.py`는 `find_packages`에서 누락됨 → site-packages에 수동 복사 필요:
+  ```bash
+  cp submodules/effrdel/src/tetutils.py ~/Desktop/venv-meshsplat10/lib/python3.10/site-packages/
+  cp submodules/effrdel/src/intersect.py ~/Desktop/venv-meshsplat10/lib/python3.10/site-packages/
+  ```
+- requirements.txt: lpips, plyfile, mediapy, opencv-python, matplotlib, tqdm, trimesh, mmengine, timm, pybind11, open3d, scipy
+- repo: `~/Desktop/mesh-splatting`
+
+**실행 커맨드 (blue_1 FHD 기준)**
+```bash
+source ~/Desktop/venv-meshsplat10/bin/activate
+unset LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda-12.3
+cd ~/Desktop/mesh-splatting
+
+# 학습 (~18분, 30000 iter)
+python3 train.py \
+    -s ~/Desktop/data/experiments/blue_1__mast3r_fhd/02_colmap \
+    -m ~/Desktop/data/experiments/blue_1__meshsplat_fhd \
+    --iterations 30000
+
+# 메시 추출 (~3분, TSDF fusion)
+python3 mesh.py \
+    -s ~/Desktop/data/experiments/blue_1__mast3r_fhd/02_colmap \
+    -m ~/Desktop/data/experiments/blue_1__meshsplat_fhd \
+    --iteration 30000
+```
+출력: `experiments/blue_1__meshsplat_fhd/train/ours_30000/fuse_post.ply`
 
 ### venv-milo 설치 목록 **[완료, 2026-06-18]**
 - **Python 3.10** 필수 (tetra_triangulation .so가 cp310으로 빌드됨, Python 3.8 불가)
@@ -341,26 +374,28 @@ python3 inference_realesrgan.py -n RealESRGAN_x2plus \
 
 ## 다음 액션 아이템
 
-### 공통 (갈래②③ 공유 prior 자산)
-- [ ] MASt3R pointmap에서 **뷰별 depth/normal/confidence 맵 추출** (run_mast3r_sfm.py 확장)
-- [ ] init용 점군 **confidence 필터 + voxel 다운샘플** 스크립트
+### 갈래① — 점맵 Screened Poisson
+- [x] ~~blue_1 720p~~ → ❌ 울퉁불퉁
+- [x] blue_1 FHD → ✅ 박스 형태 식별 가능 (`mesh_poisson_fhd.ply`)
+- [ ] blue_2, streetlight_low FHD 업스케일 + Poisson
 
-### 갈래② — MASt3R prior 기반 MILo (확정)
-- [ ] MILo 리포 clone 및 venv-milo 환경 구축 (https://github.com/Anttwo/MILo)
-- [ ] DN-Splatter식 depth+normal+confidence supervision 이식 (MASt3R 맵 입력)
-- [ ] 2-1 베이스라인: COLMAP sparse init + supervision 없음 → 순수 MILo SOTA 성능 측정
-- [ ] 2-2 기여: MASt3R dense init + depth/normal/confidence supervision → 개선도 정량화
+### 갈래② — MeshSplatting
+- [x] venv-meshsplat10 (Python 3.10) 환경 구축 ✅
+- [x] blue_1 FHD 학습 + 메시 추출 → ❌ **파편화 (Photometric Loss Failure)**
+- [ ] 다른 데이터셋 시도는 보류 (근본 원인 미해결)
 
-### 갈래③ — SDF
-- [ ] 역할 A: vanilla Neuralangelo 완주 → 상한 기준점 확보 (진행 중)
-- [ ] 역할 B: MonoSDF에서 MASt3R depth/normal prior 효과 검증 → 먹히면 Neuralangelo 이식
+### MILo (선택적 baseline)
+- [x] venv-milo 환경 구축 ✅
+- [x] blue_1 FHD 학습 + 메시 추출 ✅ (`blue_1_fhd_milo.ply` 18MB)
+- [ ] 육안 품질 확인 (Screened Poisson과 비교)
+- [ ] blue_2, streetlight_low FHD 진행 여부 판단 후
 
-### 갈래① — 점맵 baseline
-- [ ] baseline 유지, 노이즈/구멍 심하면 Shape As Points·POCO 검토
+### 갈래③ — SDF (폐기)
+- [x] Neuralangelo 폐기 완료 ❌ (학습 시간 36배)
 
 ### 비교
-- [ ] 동일 물체·동일 MASt3R-SfM 포즈로 3축 → Chamfer / F1 / 렌더링 PSNR 정량 비교
-- [ ] (선택) "MASt3R-SfM 포즈 vs COLMAP 포즈"가 표면 정확도에 미치는 영향 정량화
+- [ ] blue_1 FHD: MILo vs Screened Poisson 육안 비교
+- [ ] 2DGS 시도 검토 (표면 정렬 특화, GS 계열 중 유일하게 미시도)
 
 ---
 
