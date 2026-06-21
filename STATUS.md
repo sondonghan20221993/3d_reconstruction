@@ -63,6 +63,19 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 - **복원 속도 순위**: 2DGS(robust, 제외) > MILo(~30분) > AGS(depth prep+TSDF) > SuGaR(다단계, 최저)
 - **파이프라인**: points3D.txt를 SOR로 필터 → `real_test__mast3r_clean/02_colmap` → MILo 재실행(`real_test__milo_sor`) → 기존 MILo와 비교
 
+### SOR 실험 결과 (2026-06-22 완료)
+
+| 항목 | MILo baseline | MILo + SOR (nb=30, std=1.0) | 변화 |
+|---|---|---|---|
+| 출력 | `real_test_milo.ply` (288MB) | `real_test_milo_sor.ply` (221MB) | -23% |
+| Vertices | 7,203,794 | 5,534,552 | **-23%** |
+| bbox diagonal | 15.20 | 12.35 | **-19%** |
+
+- bbox가 15.20→12.35로 축소 = extreme floater 제거 확인
+- 버텍스 23% 감소 = 노이즈성 자잘한 메시 조각 감소
+- 시각 비교: `현재결과/03_Mesh/sor/real_test_milo_sor_비교.png`
+- **주관 평가 필요**: 형상 보존 여부 및 잡음 감소 정도 3D 뷰어로 확인 필요
+
 ---
 
 ## real_test 메시 복원 실험 이력 (2026-06-21 완료)
