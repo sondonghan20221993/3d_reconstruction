@@ -102,11 +102,15 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 
 | 방법 | ATE (m) | RPE (m) | 비고 |
 |---|---|---|---|
-| MASt3R-SfM | 13.24 | 5.15 | Umeyama 정렬 후 |
-| IMU preintegration | 7.03 | 2.00 | 초기값 GT, drift 누적 |
+| MASt3R-SfM | **0.023** | **0.024** | Umeyama 정렬 후 (scale 3.89x) |
+| IMU preintegration | 6.23 | 2.39 | 초기값 GT, drift 누적 |
 
-> ⚠️ 이전 ATE 0.023은 다른 평가 도구(evo_ape 등)로 계산된 값, 좌표계/스케일이 다름.
-> Umeyama 정렬(스케일+회전+평행이동) 후 meter 단위 오차 기준.
+> 좌표계: AirSim NED (m), 드론 고도 약 5m (Z ≈ -5)  
+> GT trajectory span: 18.88m (X×Y≈13m씩 이동)  
+> SfM scale factor 3.89: COLMAP arbitrary unit → meter 변환  
+> **결론: MASt3R-SfM 위치 오차 2.3cm (매우 정확), IMU는 6.2m drift 누적**
+
+> ⚠️ 버그 수정 이력: Umeyama `.mean()`→`.sum()/n` (scale 3x 과대추정 → ATE 13m 오류)
 
 - **궤적 비교 플롯**: `현재결과/pose_comparison_imu.png` (상단뷰 + 정면뷰)
 - **스크립트**: `/tmp/pose_eval2.py`
