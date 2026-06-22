@@ -1,10 +1,12 @@
-# 현재 작업 현황 (2026-06-21)
+# 현재 작업 현황 (2026-06-22)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: real_test baseline + prior 완료 → outlier 제거(SOR) 실험 착수
+## 현재 상태: MILo SOR 강화판 학습 중 + GOF 설치 완료
 
-blue_1은 단색 박스로 막힘 상태 유지. real_test(시뮬레이션 34장)로 파이프라인 검증 완료.
+- **진행 중**: `real_test__milo_sor2` — nb=30, std=0.5 (81.7% 보존) 학습 중, 완료 후 자동 메시 추출
+- **대기 중**: GOF (Gaussian Opacity Fields) — CUDA extension 빌드 완료, MILo 완료 직후 실행 예정
+- blue_1은 단색 박스로 막힘 상태 유지.
 
 ---
 
@@ -63,18 +65,27 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 - **복원 속도 순위**: 2DGS(robust, 제외) > MILo(~30분) > AGS(depth prep+TSDF) > SuGaR(다단계, 최저)
 - **파이프라인**: points3D.txt를 SOR로 필터 → `real_test__mast3r_clean/02_colmap` → MILo 재실행(`real_test__milo_sor`) → 기존 MILo와 비교
 
-### SOR 실험 결과 (2026-06-22 완료)
+### SOR 실험 결과 요약
 
-| 항목 | MILo baseline | MILo + SOR (nb=30, std=1.0) | 변화 |
+| 항목 | MILo baseline | MILo SOR1 (nb=30, std=1.0) | MILo SOR2 (nb=30, std=0.5) |
 |---|---|---|---|
-| 출력 | `real_test_milo.ply` (288MB) | `real_test_milo_sor.ply` (221MB) | -23% |
-| Vertices | 7,203,794 | 5,534,552 | **-23%** |
-| bbox diagonal | 15.20 | 12.35 | **-19%** |
+| 입력 pts | 1,490,920 | 1,308,980 (88%) | 1,218,707 (81.7%) |
+| 출력 파일 | `real_test_milo.ply` (288MB) | `real_test_milo_sor.ply` (221MB) | 학습 중 |
+| Vertices | 7,203,794 | 5,534,552 (-23%) | 완료 후 확인 |
+| bbox diagonal | 15.20 | 12.35 (-19%) | 완료 후 확인 |
+| 메시 품질 | 가장자리 스파이크 심각 | 가장자리 스파이크 여전히 존재 | 평가 예정 |
 
-- bbox가 15.20→12.35로 축소 = extreme floater 제거 확인
-- 버텍스 23% 감소 = 노이즈성 자잘한 메시 조각 감소
-- 시각 비교: `현재결과/03_Mesh/sor/real_test_milo_sor_비교.png`
-- **주관 평가 필요**: 형상 보존 여부 및 잡음 감소 정도 3D 뷰어로 확인 필요
+- **SOR1 결과**: 수치 개선됐으나 3D 뷰어에서 여전히 가장자리 파편 다수 → std=0.5로 강화
+- **SOR2 현황**: `real_test__milo_sor2` 학습 중 (79% 완료, ~35분 후 완료 예정)
+- outlier 위치 시각화: `real_test_SOR_outlier_비교.png` (서버: `/home/sdh/Desktop/`)
+
+### 다음 단계: GOF (Gaussian Opacity Fields)
+
+- **목적**: unbounded 야외 씬 특화 최신 모델 (NeurIPS 2024) 적용
+- **상태**: CUDA extension 빌드 완료 (`diff_gaussian_rasterization`, `simple_knn`, `tetra-triangulation`)
+- **실행 예정**: MILo SOR2 완료 후 `tmux gof` 시작
+- **입력**: SOR2 필터링된 COLMAP (`real_test__milo_sor2/colmap/`)
+- **실행 스크립트**: `/tmp/run_gof.sh`
 
 ---
 
