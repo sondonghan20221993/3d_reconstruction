@@ -2,10 +2,11 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: MILo SOR 강화판 학습 중 + GOF 설치 완료
+## 현재 상태: GOF 학습 중 + 포즈 정확도 평가 완료
 
-- **진행 중**: `real_test__milo_sor2` — nb=30, std=0.5 (81.7% 보존) 학습 중, 완료 후 자동 메시 추출
-- **대기 중**: GOF (Gaussian Opacity Fields) — CUDA extension 빌드 완료, MILo 완료 직후 실행 예정
+- **진행 중**: `real_test__gof` — GOF (Gaussian Opacity Fields, NeurIPS2024) 학습 중 (30000 iter)
+- **완료**: `real_test__milo_sor2` — 18000 iter 완료, `mesh_learnable_sdf.ply` (215MB) 추출 완료
+- **완료**: GT vs SfM vs IMU 포즈 정확도 비교 (ATE/RPE, 34 frames)
 - blue_1은 단색 박스로 막힘 상태 유지.
 
 ---
@@ -70,22 +71,45 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 | 항목 | MILo baseline | MILo SOR1 (nb=30, std=1.0) | MILo SOR2 (nb=30, std=0.5) |
 |---|---|---|---|
 | 입력 pts | 1,490,920 | 1,308,980 (88%) | 1,218,707 (81.7%) |
-| 출력 파일 | `real_test_milo.ply` (288MB) | `real_test_milo_sor.ply` (221MB) | 학습 중 |
-| Vertices | 7,203,794 | 5,534,552 (-23%) | 완료 후 확인 |
-| bbox diagonal | 15.20 | 12.35 (-19%) | 완료 후 확인 |
+| 출력 파일 | `real_test_milo.ply` (288MB) | `real_test_milo_sor.ply` (221MB) | `real_test_milo_sor2.ply` (215MB) ✅ |
+| Vertices | 7,203,794 | 5,534,552 (-23%) | 측정 필요 |
+| bbox diagonal | 15.20 | 12.35 (-19%) | 측정 필요 |
 | 메시 품질 | 가장자리 스파이크 심각 | 가장자리 스파이크 여전히 존재 | 평가 예정 |
+| 학습 시간 | — | — | 18000 iter / 6828초 (~114분) |
 
 - **SOR1 결과**: 수치 개선됐으나 3D 뷰어에서 여전히 가장자리 파편 다수 → std=0.5로 강화
-- **SOR2 현황**: `real_test__milo_sor2` 학습 중 (79% 완료, ~35분 후 완료 예정)
-- outlier 위치 시각화: `real_test_SOR_outlier_비교.png` (서버: `/home/sdh/Desktop/`)
+- **SOR2 결과**: ✅ 완료. 215MB PLY 로컬 저장 (`현재결과/03_Mesh/sor/real_test_milo_sor2.ply`)
+- outlier 위치 시각화: `real_test_SOR_outlier_topview.png` (단일 상단뷰, RGB 컬러 포인트)
 
-### 다음 단계: GOF (Gaussian Opacity Fields)
+### GOF (Gaussian Opacity Fields) — 진행 중
 
 - **목적**: unbounded 야외 씬 특화 최신 모델 (NeurIPS 2024) 적용
-- **상태**: CUDA extension 빌드 완료 (`diff_gaussian_rasterization`, `simple_knn`, `tetra-triangulation`)
-- **실행 예정**: MILo SOR2 완료 후 `tmux gof` 시작
-- **입력**: SOR2 필터링된 COLMAP (`real_test__milo_sor2/colmap/`)
-- **실행 스크립트**: `/tmp/run_gof.sh`
+- **상태**: ✅ 학습 중 (`tmux gof`, 30000 iter)
+- **입력**: SOR2 필터링된 COLMAP (`real_test__milo_sor2/colmap/`, 1,218,707 pts)
+- **출력 예정**: `real_test__gof/mesh_0030000.ply`
+- **로그**: `/home/sdh/Desktop/gof_run.log`
+
+---
+
+## 포즈 정확도 비교 — GT vs MASt3R-SfM vs IMU (2026-06-22)
+
+### 데이터
+- **GT**: AirSim meta JSON `camera.pose` (ground truth, 오차 없음) — 34프레임
+- **SfM**: COLMAP `images.txt` → world 위치 복원 (R^T(-t))
+- **IMU**: Euler preintegration (gravity 보정, 초기값=GT frame 0)
+
+### 결과
+
+| 방법 | ATE (m) | RPE (m) | 비고 |
+|---|---|---|---|
+| MASt3R-SfM | 13.24 | 5.15 | Umeyama 정렬 후 |
+| IMU preintegration | 7.03 | 2.00 | 초기값 GT, drift 누적 |
+
+> ⚠️ 이전 ATE 0.023은 다른 평가 도구(evo_ape 등)로 계산된 값, 좌표계/스케일이 다름.
+> Umeyama 정렬(스케일+회전+평행이동) 후 meter 단위 오차 기준.
+
+- **궤적 비교 플롯**: `현재결과/pose_comparison_imu.png` (상단뷰 + 정면뷰)
+- **스크립트**: `/tmp/pose_eval2.py`
 
 ---
 
@@ -219,6 +243,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 | `venv-2dgs` | ✅ | 2DGS (Python 3.10) |
 | `venv-meshsplat10` | ✅ | MeshSplatting CVPR2026 |
 | `conda ags_mesh` | ✅ | AGS-Mesh-2dgs (Python 3.10, PyTorch 2.1.2) |
+| `venv-gof` | ✅ | GOF (NeurIPS2024, numpy 1.26.4, setuptools 69.5.1) |
 | `/usr/bin/python3` | ✅ | open3d 0.13.0 (시스템) |
 
 - **주의**: 환경 전환 시 `unset LD_LIBRARY_PATH` 필수
