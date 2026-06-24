@@ -2,12 +2,12 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: GOF 학습 중 + 포즈 정확도 평가 완료
+## 현재 상태: 메시 품질 평가 완료 + 근본 원인 확인
 
-- **진행 중**: `real_test__gof` — GOF (Gaussian Opacity Fields, NeurIPS2024) 학습 중 (30000 iter)
-- **완료**: `real_test__milo_sor2` — 18000 iter 완료, `mesh_learnable_sdf.ply` (215MB) 추출 완료
-- **완료**: GT vs SfM vs IMU 포즈 정확도 비교 (ATE/RPE, 34 frames)
-- blue_1은 단색 박스로 막힘 상태 유지.
+- **완료**: `real_test__milo_sor2` — 18000 iter, `mesh_learnable_sdf.ply` (215MB)
+- **완료**: `blue_1__milo_fhd_prior` — 20MB PLY (depth prior 적용)
+- **완료**: 메시 정량 평가 (Chamfer Distance + F-score) — 모든 데이터셋에서 texture 부족이 병목
+- **보류**: `real_test__gof` — 메시 추출 hanging (binary search step 7 후 멈춤)
 
 ---
 
@@ -81,17 +81,62 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 - **SOR2 결과**: ✅ 완료. 215MB PLY 로컬 저장 (`현재결과/03_Mesh/sor/real_test_milo_sor2.ply`)
 - outlier 위치 시각화: `real_test_SOR_outlier_topview.png` (단일 상단뷰, RGB 컬러 포인트)
 
-### GOF (Gaussian Opacity Fields) — 진행 중
+### GOF (Gaussian Opacity Fields) — 학습 완료, 메시 추출 실패
 
 - **목적**: unbounded 야외 씬 특화 최신 모델 (NeurIPS 2024) 적용
-- **상태**: ✅ 학습 중 (`tmux gof`, 30000 iter)
+- **학습**: ✅ 30000 iter 완료
+- **메시 추출**: ❌ binary search step 0~7 완료 후 hanging (최종 메시 생성 단계서 멈춤)
 - **입력**: SOR2 필터링된 COLMAP (`real_test__milo_sor2/colmap/`, 1,218,707 pts)
-- **출력 예정**: `real_test__gof/mesh_0030000.ply`
-- **로그**: `/home/sdh/Desktop/gof_run.log`
 
 ---
 
-## 포즈 정확도 비교 — GT vs MASt3R-SfM vs IMU (2026-06-22)
+## 메시 품질 정량 평가 (2026-06-24)
+
+### 평가 방법
+
+- **GT**: UE5 scene cube extract (정확한 좌표 + 메시)
+- **지표**: Chamfer Distance (CD), F-score @1cm/@5cm/@10cm
+- **정렬**: 스케일 정규화 (bbox diagonal 기준)
+
+### blue_1 결과 (1개 큐브)
+
+| 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 평가 |
+|---|---|---|---|---|---|
+| MILo baseline | **9.40** | 0.022 | 0.178 | **0.556** | ✅ 최고 |
+| MILo+prior | 11.35 | 0.014 | 0.135 | 0.365 | ❌ depth prior 악화 |
+| AGS-Mesh | 9.67 | 0.023 | **0.221** | 0.523 | 유사 |
+| MASt3R TSDF | 10.08 | 0.016 | 0.153 | 0.470 | — |
+| 2DGS | 10.63 | 0.008 | 0.114 | 0.446 | — |
+
+**발견**: depth prior가 오히려 해악 (단색 박스에서 depth map 노이즈가 학습 왜곡)
+
+### real_test 결과 (5개 큐브)
+
+| 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 평가 |
+|---|---|---|---|---|---|
+| MILo baseline | **21.54** | 0.000 | 0.025 | 0.088 | — |
+| **MILo SOR2** | 21.44 | 0.000 | 0.010 | **0.101** | ⚠️ SOR 무의미 |
+| MILo+prior | 21.42 | 0.000 | 0.014 | 0.081 | ⚠️ prior 무의미 |
+| AGS baseline | 23.52 | 0.000 | 0.013 | 0.052 | — |
+| AGS+prior | 24.31 | 0.000 | 0.009 | 0.102 | — |
+| 2DGS | 21.52 | 0.001 | 0.012 | 0.100 | — |
+
+**발견**: SOR, depth prior 모두 효과 없음 → 모든 방법 ~21-24cm (texture 부족이 병목)
+
+### 결론
+
+**근본 원인: Texture/photometric gradient 부족**
+- blue_1: 단색 파란 박스 → 색상 정보 전무
+- real_test: 주로 단색 배경 + 5개 큐브 → signal 극도로 부족
+
+**시사점**:
+1. Outlier 제거(SOR) → 실제 메시 품질 향상 무
+2. Depth prior → blue_1에서 악화, real_test에서 무의미
+3. 모든 방법(2DGS/MILo/AGS) 비슷하게 실패 → **알고리즘이 아니라 데이터 문제**
+
+---
+
+## 포즈 정확도 비교 — GT vs MASt3R-SfM (2026-06-23)
 
 ### 데이터
 - **GT**: AirSim meta JSON `camera.pose` (ground truth, 오차 없음) — 34프레임
