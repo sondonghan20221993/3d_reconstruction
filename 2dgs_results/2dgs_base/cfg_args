@@ -1,0 +1,1 @@
+Namespace(data_device='cuda', eval=False, images='images', model_path='/home/sdh/Desktop/data/experiments/blue_1__2dgs_fhd_base', render_items=['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature'], resolution=-1, sh_degree=3, source_path='/home/sdh/Desktop/data/experiments/blue_1__mast3r_fhd/02_colmap_dense', white_background=False)

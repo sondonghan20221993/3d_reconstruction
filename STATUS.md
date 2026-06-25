@@ -1,13 +1,18 @@
-# 현재 작업 현황 (2026-06-22)
+# 현재 작업 현황 (2026-06-25)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 메시 품질 평가 완료 + 근본 원인 확인
+## 현재 상태: 3m_1 평가 파이프라인 설계 완료 → 재실행 대기 (2026-06-25)
 
 - **완료**: `real_test__milo_sor2` — 18000 iter, `mesh_learnable_sdf.ply` (215MB)
 - **완료**: `blue_1__milo_fhd_prior` — 20MB PLY (depth prior 적용)
 - **완료**: 메시 정량 평가 (Chamfer Distance + F-score) — 모든 데이터셋에서 texture 부족이 병목
 - **보류**: `real_test__gof` — 메시 추출 hanging (binary search step 7 후 멈춤)
+- **완료 (2026-06-24)**: GS-2M (Eurographics 2026) 학습 + TSDF 메시 추출 — `/mnt/c/Users/sdh97/Desktop/3d_results/real_test/gs2m_output/`
+- **완료 (2026-06-24)**: 실제 드론 3개 고도 폴더 MASt3R-SfM — `sysai3:~/Desktop/data/drone_real_sfm/{3m_1,5m_1,7m_1}/`
+- **완료 (2026-06-24)**: GS-2M 메시 품질 정량 평가 (재평가, Umeyama 기반 COLMAP 공간 비교)
+- **❌ 취소**: 3m_1 첫 번째 학습 시도 (GS-2M/2DGS/MILo) — focal 버그로 전량 폐기
+- **⏳ 대기**: focal 수정 후 3m_1 재실행 (파이프라인 설계 완료)
 
 ---
 
@@ -110,7 +115,9 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 
 **발견**: depth prior가 오히려 해악 (단색 박스에서 depth map 노이즈가 학습 왜곡)
 
-### real_test 결과 (5개 큐브)
+### real_test 결과 (5개 큐브, 구 평가 방법)
+
+> ⚠️ 아래 수치는 원본 eval 스크립트 결과 (스크립트 분실로 재현 불가). GS-2M 비교는 상단 "GS-2M 학습+평가" 섹션 참조.
 
 | 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 평가 |
 |---|---|---|---|---|---|
@@ -324,3 +331,146 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 | blue_2 | 106 | ⬜ 대기 |
 | streetlight_low | 75 | ⬜ 대기 |
 | blue_person | 38 | ⬜ 대기 |
+
+---
+
+## 실제 드론 촬영 데이터 (2026-06-24 추가)
+
+- **출처**: 실제 드론으로 촬영한 영상 프레임 (시뮬레이션 아님)
+- **Google Drive**: https://drive.google.com/file/d/1y_HwAsE0eA3lCimyzNVqh3dLiGPdrs-e/view?usp=sharing
+- **파일**: ZIP (197MB), 총 1,656장 JPG
+- **로컬**: `C:\Users\sdh97\Desktop\drone_images\{3m_1,5m_1,7m_1}\`
+
+| 폴더 | 장수 | 설명 |
+|---|---|---|
+| `3m_1` | 547장 | 고도 3m 촬영 |
+| `5m_1` | 544장 | 고도 5m 촬영 |
+| `7m_1` | 565장 | 고도 7m 촬영 |
+
+- **비고**: 기존 STATUS.md의 `real_test` 항목에 "시뮬레이션"으로 잘못 기재된 부분 있음. real_test 34장도 실제 드론 촬영 데이터임.
+
+### 드론 영상 MASt3R-SfM 결과 (2026-06-24 완료)
+
+- **서버**: sysai3, 환경 `venv-mast3r`, 스크립트 `~/Desktop/run_drone_mast3r.sh`
+- **설정**: scene_graph=swin winsize=5, 10프레임마다 1장 샘플링 (~55장/폴더), shared_intrinsics
+
+| 폴더 | 입력 장수 | 출력 | 경로 |
+|---|---|---|---|
+| `3m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/3m_1/` |
+| `5m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/5m_1/` |
+| `7m_1` | 57장 | poses.npy (57,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/7m_1/` |
+
+---
+
+## GS-2M (Eurographics 2026) 학습 + 평가 (2026-06-24)
+
+### 학습 정보
+
+- **입력**: `real_test` 데이터 (34장, 1920×1080), COLMAP 초기화
+- **모델**: GS-2M — material-aware Gaussian Splatting + TSDF mesh extraction
+- **환경**: `conda gs2m` (GCC11, CUDA11.8, NumPy<2)
+- **출력 디렉토리**: `C:\Users\sdh97\Desktop\3d_results\real_test\gs2m_output\`
+
+| 항목 | 값 |
+|---|---|
+| 학습 iter | 30,000 |
+| L1 loss (최종) | 0.0199 |
+| PSNR (최종) | 31.21 dB |
+| TSDF 메시 | `train/ours_30000/mesh/tsdf_post.ply` ✅ |
+
+### 메시 품질 평가 (재평가, Umeyama 카메라 포즈 정렬 기반)
+
+> **평가 방법**: Umeyama 변환 (카메라 포즈 기반, scale=3.89×, ATE=2.3cm) → GT 큐브를 COLMAP 공간으로 역변환 → COLMAP 공간에서 직접 CD/F-score 계산
+>
+> **GT**: UE5 Cube8~12.ply (5개 큐브, X=1.235~1.587 COLMAP units)
+>
+> **참고**: 이전 평가(21-24cm)는 스크립트 미확인으로 재현 불가. 아래는 동일 방법으로 전 방법 재평가한 공정 비교임.
+
+| 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 비고 |
+|---|---|---|---|---|---|
+| AGS baseline | **25.41** | 0.019 | 0.057 | **0.127** | ✅ CD 최저 |
+| **GS-2M (ours)** | **27.79** | 0.004 | 0.029 | 0.057 | ← **NEW** |
+| MILo SOR2 | 30.72 | 0.003 | 0.013 | 0.024 | — |
+| MILo baseline | 37.20 | 0.003 | 0.010 | 0.018 | — |
+| 2DGS | 37.25 | 0.003 | 0.019 | 0.036 | — |
+
+> **해석**: CD 기준으로 GS-2M은 MILo/2DGS 대비 25-27% 개선. 5개 큐브 전체 씬에서 CD가 높은 것은 전체 씬 메시를 GT 소형 큐브와 비교하기 때문 (대부분의 메시 포인트가 큐브 표면과 거리가 멈).
+
+### 스크립트
+
+- **학습**: `/tmp/GS-2M/train.py` — `source ~/miniconda3/bin/activate gs2m && export CC=~/miniconda3/envs/gs2m/bin/gcc ...`
+- **메시 추출**: `/tmp/GS-2M/render.py --extract_mesh --skip_test`
+- **평가**: `/tmp/eval_gs2m.py` (Umeyama + COLMAP 공간 CD/F-score)
+
+---
+
+## 3m_1 드론 데이터 평가 파이프라인 설계 (2026-06-25 확정)
+
+### 목적
+실제 드론 촬영 데이터(GT 없음) → GS-2M / 2DGS / MILo 3모델 비교
+- **정량**: PSNR / SSIM / LPIPS (NVS, held-out test views)
+- **정성**: 메시 추출 후 시각 비교 (GT 없으므로 CD 불가)
+
+### ❌ 첫 번째 시도 폐기 사유: focal 버그
+
+MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그 해상도 기준으로 저장.
+변환 스크립트에서 원본 해상도(1920)로 스케일백을 누락.
+
+| 항목 | 잘못된 값 | 올바른 값 |
+|------|----------|----------|
+| MASt3R 처리 해상도 | 512×288 | — |
+| 저장된 focal | 359.88px | — |
+| 스케일 팩터 | 누락 | 1920/512 = **×3.75** |
+| 1920px 기준 focal | ❌ 359.88 (FOV 139°) | ✅ **1349.55** (FOV 71°) |
+
+→ 카메라가 사실상 어안렌즈로 설정되어 학습 → PSNR 16dB (정상 22dB+)
+
+### 데이터 준비 (재실행 필요)
+
+- **소스**: sysai3 `~/Desktop/data/drone_real/3m_1/` (55장, 매 10프레임)
+- **포즈**: `drone_real_sfm/3m_1/poses.npy` (55,4,4) c2w
+- **COLMAP 변환 수정 사항**:
+  - `focal = focals_npy[0] * (1920 / 512)` = **1349.55px**
+  - cx=960, cy=540 (변경 없음)
+  - images.txt: poses.npy 순서 = 이미지 정렬 순서 ✅ 확인됨
+  - points3D.ply: 200k 다운샘플 (0pt 버그 수정 유지)
+
+### 학습 설정 (확정)
+
+| 항목 | 설정 | 비고 |
+|------|------|------|
+| 해상도 | **1920×1080** (코드 패치 필요) | `camera_utils.py` 1600 캡 제거 |
+| eval | `--eval` (llffhold=8) | 7장 held-out test |
+| iter | GS-2M/2DGS: 30k, MILo: 18k | 각자 수렴 스케줄 |
+| points3D | 200k 다운샘플 PLY | |
+
+> ⚠️ **1920 코드 패치**: GS-2M/2DGS/MILo 모두 `utils/camera_utils.py`에 `if orig_w > 1600: rescale` 하드코딩됨
+> → 각 모델의 `camera_utils.py`에서 해당 분기 제거 또는 1920으로 임계값 상향 필요
+
+### 평가 파이프라인 (3단계)
+
+```
+1. train.py --eval        → 학습 + PSNR 출력 (train 로그에서)
+2. render.py              → test 뷰 렌더링
+3. metrics.py             → SSIM / LPIPS 계산
+```
+
+> ⚠️ SSIM/LPIPS는 train 로그에 **안 나옴** — 반드시 render→metrics 실행 필요
+
+### 메시 추출 방식 (모델별 상이, 정상)
+
+| 모델 | 방식 | 실행 |
+|------|------|------|
+| GS-2M | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --extract_mesh` |
+| 2DGS | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --mesh` |
+| MILo | 학습된 occupancy/SDF → Marching Tetrahedra | `mesh_extract_sdf.py` |
+
+> TSDF `voxel_size = max_depth/1024`, `sdf_trunc = 4×voxel` — 씬 스케일 자동 적응 (수동 튜닝 불필요)
+
+### NVS 결과 (실행 후 업데이트 예정)
+
+| 방법 | iter | PSNR (dB) | SSIM | LPIPS | 메시 |
+|------|------|-----------|------|-------|------|
+| GS-2M | 30k | - | - | - | TSDF |
+| 2DGS | 30k | - | - | - | TSDF |
+| MILo | 18k | - | - | - | SDF |
