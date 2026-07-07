@@ -81,17 +81,16 @@
 
 ---
 
-## 8. 시뮬레이션 4m old 임시 검증 실험 (2026-06-29)
+## 8. 시뮬레이션 4m 독립 데이터셋 (2026-06-29)
 
-> ⚠️ **임시 실험**: 기존 시뮬레이션(3m+7m)에 5m 고도 데이터가 없어, old `real_test` 데이터 중
-> **frame 0-16 (~4.3m, 17장)** 을 현재 파이프라인으로 재실행. AirSim/Unreal 씬 동일 → GT 메시 재사용 가능.
-> 향후 AirSim에서 5m 균일 촬영 시 이 실험으로 대체 예정.
+> **독립 데이터셋**: `real_test_4m_old`는 AirSim/Unreal 단일 씬의 4m 고도 시뮬레이션.
+> 3m, 7m과 동일 씬 → GT 메시 재사용 가능. 다고도 조합 실험용으로 사용.
 
 ### 실험 조건
 
 | 항목 | 값 |
 |---|---|
-| 데이터 | old `real_test` frame 0-16, 고도 ~4.3m, **17장** |
+| 데이터 | 4m 고도, **17장** |
 | 이미지 경로 | `datasets/real_test_4m_old/rgb/` (000000~000016.png) |
 | 해상도 | 1920×1080 |
 | GT 메시 | 동일 (`gt_scene_clean.ply`, `gt_cubes.ply`) |
@@ -122,7 +121,8 @@
 > - GS-2M: `real_test_4m_old__gs2m/train/ours_30000/mesh/tsdf_post.ply` (193M, 3.94M V)
 > - MILo: `real_test_4m_old__milo/mesh_learnable_sdf.ply` (146M, vertex color 포함)
 > - 메시 추출 명령: GS-2M `render.py -m <out> --extract_mesh --skip_test` / MILo `mesh_extract_sdf.py -s <colmap> -m <out> --rasterizer radegs` (milo/milo/ 에서)
-> - 메시 추출 명령(추가): 2DGS `render.py -m <out> -s <colmap> --voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04 --num_cluster 1` / 3DGS `/tmp/run_3dgs_tsdf_4m.py` (open3d TSDF)
+> - 메시 추출 명령(추가): 2DGS `render.py -m <out> -s <colmap> --num_cluster 1` (voxel_size/depth_trunc/sdf_trunc는 지정하지 말 것 — 아래 주의사항 참고) / 3DGS `/tmp/run_3dgs_tsdf_4m.py` (open3d TSDF)
+> - ⚠️ **주의**: 과거 이 문서에 2DGS 명령을 `--voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04` 절대값으로 기록했었으나, 이는 GT-free 원칙 위반이자 불필요한 오버라이드였음. GS-2M/2DGS 모두 이 인자들을 비워두면(기본값 -1) 카메라 포즈 기반 씬 반지름(GS-2M: `cameras_extent`, 2DGS: `radius`, 둘 다 GT 불필요)으로 자동 스케일링됨 — MASt3R가 up-to-scale이라 씬마다 절대값이 다르게 맞아야 하므로 반드시 기본값(자동 계산)을 쓸 것. (2026-07-06, [[pipeline_improvement_plan]] 4번 항목 조사에서 확인)
 
 ### 메시 CD/F-score 평가 결과 (2026-06-29, GT 큐브 Cube8-12 기준)
 
@@ -201,6 +201,29 @@ python3 train.py \
 
 > ⚠️ 주의: MILo는 `--imp_metric outdoor --rasterizer radegs` 빠뜨리면 안 됨.
 > COLMAP/PLY prior 경로: `real_test_4m_old__colmap`, `real_test_4m_old__mast3r/pointcloud.ply`.
+
+---
+
+## 9. retrieval-20-5 채택 & GS-2M 파이프라인 개선 조사 (2026-07-05~07)
+
+> 상세 근거/수치는 전부 `pipeline_improvement_plan.md`에 있음. 여기는 요약+포인터만.
+
+### scene_graph=retrieval-20-5 최종 채택 (2026-07-05)
+
+- swin-5(순차 슬라이딩 윈도) 대신 MASt3R-SfM `scene_graph=retrieval` (Na=20 anchor, k=5 neighbor)로 전환.
+- 근거: 3m+7m 다고도 조합에서 ATE 10배 개선(박스 분리 문제 해결), 4m 단일고도에서도 궤도 매끄러움 1.9% 개선, 5m_1 실제 드론 데이터에서도 동등 이상.
+- **모든 신규 실험은 retrieval-20-5를 기본값으로 사용할 것.**
+
+### GS-2M 파이프라인 개선 4항목 조사 결과 (2026-07-06~07, `real_test_4m_old` 4m 시뮬 데이터 기준)
+
+| # | 항목 | 결론 |
+|---|---|---|
+| 2 | Depth Supervision | GS-2M 미지원(죽은 배선) — 구현 비용 大, 보류 |
+| 3 | Confidence/voxel/SOR 필터링 | ✅ 완료. GT-free 적응형 voxel(median NN distance 배수) 설계, k=1.4(~1cm)가 메시 단계 최종 최적(raw 대비 CD -1.2%, F@1cm +6.3%) |
+| 4 | 메시 추출 파라미터 정규화 | ✅ 이미 구현되어 있었음 — GS-2M/2DGS 둘 다 voxel_size 등을 비워두면 카메라 포즈 기반 자동 스케일링(GT 불필요). 과거 STATUS.md의 2DGS 하드코딩 명령은 안티패턴이라 삭제 |
+| — | 표면 지터 노이즈 / 딥러닝 디노이저 검토 | 오라클 실험 3종(discrete-snap/dedup/연속표면투영-밀도보존) 전부 raw/k1.4보다 나쁨(CD 2.46/2.43 vs 2.79~3.15cm) → 밀도를 count 기준 완전히 보존해도 결과가 나쁨 → 병목은 밀도 손실만이 아니라 **정확도 개선 개입 자체**(색상-위치 불일치, 단순 평면 표면에서 노이즈의 자연 산포가 오히려 Gaussian 국소형상 추정에 유리했을 가능성). 병합형(voxel/confidence merging)·변위형(StraightPCF 등) 디노이저 모두 폐기 |
+
+**핵심 방법론 교훈**: 점군 단계 proxy 지표(CD/F-score)로 고른 최적 파라미터가 GS-2M 메시 단계에서 정반대로 뒤집힘 — 반드시 최종 소비 단계까지 검증할 것. 오라클(이론적 최선) 실험도 밀도 보존 여부를 반드시 별도 확인해야 함(discrete-snap은 겉보기 count 유지에도 실제로는 밀도가 붕괴할 수 있음). 이 병목(작은 물체+저뷰수 씬에서 점 정확도 개선이 순이득이 아님)을 다루려면 "노이즈 제거/정교화"가 아니라 "관심 영역 점 늘리기" 방향이 유망한 다음 후보.
 
 ---
 
