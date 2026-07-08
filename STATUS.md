@@ -1250,3 +1250,59 @@ MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그
 | GS-2M | 30k | - | - | - | TSDF |
 | 2DGS | 30k | - | - | - | TSDF |
 | MILo | 18k | - | - | - | SDF |
+
+---
+
+## 10. AirSim GPS 오차 시뮬레이션 & Waypoint 개수 결정 (2026-07-09)
+
+### 목적
+
+실제 드론 촬영 계획(waypoint 개수, 반경)을 정하기 전에, GPS 오차가 실제 비행경로/waypoint 도달 오차에 얼마나 영향을 주는지 AirSim 시뮬레이션으로 먼저 정량화. 그 결과를 바탕으로 MASt3R-SfM 입력용 waypoint 개수(사진 장수)를 공학적으로 결정하고, 실제 촬영 스크립트를 준비.
+
+### GPS 오차 모델 (Cosys-AirSim estimator, 신규 구현)
+
+| 항목 | 값/방식 |
+|---|---|
+| 대상 하드웨어 | u-blox MAX-M10S (M10050) |
+| 수평 오차 | 1.5m CEP (데이터시트) |
+| 수직 오차 | 2.5m LEP (스펙 미기재, 수평의 ~1.7배로 가정) |
+| 갱신율 | 10Hz, latency 0.1s |
+| TTFF | 26s (cold start; 이 구간 동안 GPS 출력 자체가 없음 → 스폰 위치 고정) |
+| 오차 구조 | Gauss-Markov 바이어스(분산 90%, τ=60s) + 백색잡음(10%) — PX4 SITL `gazebo_gps_plugin`과 동일 계열 |
+| Heading 오차 | QMC5883L급, 2° 표류 바이어스(τ=120s) |
+| 제어 반영 | 저역통과(시상수 5s) 필터 — 빠른 백색잡음은 걸러내되 느린 바이어스는 실제 제어용 위치추정(estimator)에 통과시켜, 실비행처럼 GPS 오차가 궤적에 흔들림으로 나타나게 함 |
+
+- 파일: `Plugins/AirSim/Source/AirLib/include/vehicles/multirotor/firmwares/simple_flight/AirSimSimpleFlightEstimatorGps.hpp` (신규 파일, 원본 estimator는 미수정)
+- 배선: `SimpleFlightApi.hpp`에서 GPS 센서 참조 3줄만 추가
+- settings.json 프리셋 (`D:\UE_5.4\Engine\Binaries\Win64\`): `settings_disturbed.json`(바람 3m/s + GPS 오차, 현재 활성), `settings_baseline.json`(외란 없음, ablation 기준경로용)
+
+> ⚠️ **시행착오**: 첫 시도는 완벽한 ground-truth 속도로 dead-reckoning + 분산기반 칼만게인 조합 → 관성이 완벽하다고 가정되어 GPS를 0.0015%만 반영, 오차가 사실상 사라짐(truth-est 간극 2.4cm). 시상수 고정 저역통과 필터로 교체 후 간극 평균 2.5m(≈GPS CEP 스케일)로 정상화 확인.
+
+### Waypoint 개수 결정 — 기하 오차 vs GPS 오차 균형
+
+원을 n개 점으로 근사할 때 코너커팅(기하) 오차 ≈ R(1-cos(π/n)). R=15m 기준:
+
+| n | 기하 오차 | 판단 |
+|---|---|---|
+| 4 | 4.4m | GPS 오차(1.5m CEP)의 3배 — 측정을 오염시킴 |
+| 8 | 1.14m | 경계선 |
+| **12** | **0.51m** | GPS 오차의 1/3 — 균형점, 실제 비행 waypoint 개수 추천값 |
+| 36 | 0.06m | GPS 오차 순수 측정(ablation)용 — 실제 임무엔 과잉 |
+
+→ MASt3R-SfM 최소 요구 뷰 수(문헌상 객체 중심 sparse-view 6~8장)와도 부합 → **실제 비행은 12 waypoint 권장**.
+
+### 스크립트
+
+`D:\epic\CitySample\scripts\waypoint_gps_error_test.py` (Cosys-AirSim, cosysairsim 파이썬 클라이언트, RPC 포트 47000)
+
+- `--circle`: 연속경로(`moveOnPathAsync`)로 원형 비행, 실제/추정 위치를 실시간 샘플링 → CSV (GPS 오차 정량화용)
+- `--capture`: 각 지점에서 정지(`moveToPositionAsync`) + 중심 오브젝트를 향해 yaw 자동 조준 + 촬영 → `{out_dir}/NNN.png` + `capture_log.csv`(참값/추정 pose, eph/epv 포함) — **MASt3R-SfM 입력용**
+- `--targets <오브젝트명>`: `simGetObjectPose`로 씬 오브젝트(예: `StaticMeshActor_7`) 위치를 자동 조회해 원 중심으로 사용 (UE 에디터 액터 라벨과 내부 `GetName()`이 다를 수 있음 — `--list-objects ".*"` 로 사전 확인 필요)
+- 예: `--capture --targets StaticMeshActor_7 --radius 15 --num-points 18 --out-dir captures_18`
+
+### 현재 상태 / 다음 단계
+
+- [x] GPS 오차 모델 구현 + 검증 (제어 루프에 실제 반영 확인, truth-est 간극 ~2.5m로 정상화)
+- [x] 18장 MASt3R-SfM 정합 서버에서 1회 완료
+- [ ] AirSim `--capture`로 18장 촬영 → 각도 균등 서브샘플링(12/8/6장) → MASt3R-SfM 재실행 → 18장 결과 기준 포즈/포인트클라우드 비교(ICP RMSE, 카메라 등록 성공률)로 최소 waypoint 개수 실측 검증
+- [ ] GPS 오차 몬테카를로 반복(시드 다중화, 30~100회) — waypoint 추종오차의 분포/CEP 추정. 현재 난수 시드가 코드에 고정돼 있어 Python에서 제어 불가 → RPC로 시드 노출 필요(미착수)
