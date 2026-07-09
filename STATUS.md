@@ -1306,3 +1306,40 @@ MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그
 - [x] 18장 MASt3R-SfM 정합 서버에서 1회 완료
 - [ ] AirSim `--capture`로 18장 촬영 → 각도 균등 서브샘플링(12/8/6장) → MASt3R-SfM 재실행 → 18장 결과 기준 포즈/포인트클라우드 비교(ICP RMSE, 카메라 등록 성공률)로 최소 waypoint 개수 실측 검증
 - [ ] GPS 오차 몬테카를로 반복(시드 다중화, 30~100회) — waypoint 추종오차의 분포/CEP 추정. 현재 난수 시드가 코드에 고정돼 있어 Python에서 제어 불가 → RPC로 시드 노출 필요(미착수)
+
+---
+
+## 11. 실촬영 waypoint 개수 ablation + 서버 MASt3R-SfM 검증 (2026-07-09)
+
+### 촬영 스크립트 전환
+
+커스텀 `waypoint_gps_error_test.py` 대신, 기존 프로젝트 스크립트 `D:\epic\CitySample\test_auto_operate_optimal.py`를 그대로 사용(중복 구현 방지). 카메라(짐벌)는 이미 `CAMERA_PITCH_DEG=-45.0`로 고정 구현되어 있어 고도/반경과 무관하게 45도 하향 촬영됨. `--mode orbit_only`로 원형 궤도 지정 waypoint 수만큼 정지-촬영, 각 프레임에 `vehicle_pose`(ground truth)와 `multirotor_kinematics`(GPS-필터링 추정치)를 함께 JSON으로 기록.
+
+### 고도 드리프트 버그 (발견 + 수정)
+
+- **증상**: 반경10m/고도4m 지정 촬영(`captures_4m_r11`)에서 `vehicle_pose.z`(실제 고도)가 -7.5m → -11m까지 표류. `multirotor_kinematics.position.z`(추정치)는 -4~-4.8m로 정상 표시 — 즉 **드론이 실제로는 명령한 4m보다 훨씬 높이 떠서, 잘못된 추정치를 4m로 보이게 만드는 중**이었음.
+- **원인**: 수평(X/Y)과 동일한 Gauss-Markov GPS 바이어스 모델을 Z축에도 그대로 적용(EpvFinal=2.5). 상관시간(τ=60s)이 촬영 1회 비행시간(~30~40s)보다 길어서, 한 번의 큰 Z바이어스 표본이 비행 내내 거의 고정값으로 유지됨 → 고도유지 제어기가 편향된 추정치를 4m로 맞추려다 실제 고도를 계속 밀어올림. 실기체는 이 문제를 기압계(정확·표류 없음)로 회피하는데, 시뮬레이션은 GPS-Z(가장 나쁜 채널)를 그대로 쓰고 있었음.
+- **수정**: `AirSimSimpleFlightEstimatorGps.hpp`에 `getBaroAltitude()` 추가 — Z 추정치는 GPS Gauss-Markov 바이어스를 완전히 우회하고 매 틱 `true_z + 백색잡음(σ=0.15m)`만 사용. 검증(`captures_4m_r10`): 실제 고도 -4.1~-4.65m로 안정화(±0.1~0.3m), 수평 GPS 오차(추정-실제 간극 1.4~2.9m)는 정상적으로 유지됨.
+
+### MASt3R-SfM 서버 환경 문제 해결
+
+- **증상**: `conda recon3d` 환경에서 실행 시 `ImportError: GLIBCXX_3.4.29 not found`(PIL/Lerc, libstdc++ 구버전) 발생. `LD_LIBRARY_PATH`로 conda 환경의 최신 libstdc++를 우선시키면 PIL은 해결되나 `AttributeError: torch._C has no attribute _OutOfMemoryError`(torch CUDA 확장 ABI 깨짐)로 다른 에러 발생 — PIL과 torch가 서로 다른 libstdc++ 버전을 요구하는 환경 자체 결함.
+- **해결**: `recon3d` 대신 기존에 준비되어 있던 **`venv-mast3r`**(`/home/sdh/Desktop/venvs/venv-mast3r`, python3.10, torch 2.1.2+cu121) 사용 — PIL/torch 동시 임포트 정상 확인. `run_mast3r_sfm.py`는 `/home/sdh/Desktop/models/MAST3R_2/`에 위치.
+- **주의**: sysai3 로그인 셸 `.bashrc`에 문법 오류(`line 3: unexpected token 'fi'`) 있음 — 매 SSH 세션마다 경고 출력되지만 명령 실행 자체엔 영향 없음(작업 범위가 `~/Desktop/` 이하로 제한되어 있어 별도 수정하지 않음).
+
+### Waypoint 개수 ablation 결과 (반경10m/고도4m, `scene_graph=retrieval-20-5` — 프로젝트 표준)
+
+| 데이터셋 | 장수 | 외란 | 매칭 페어 | 포인트 수 |
+|---|---|---|---|---|
+| `captures_4m_r10_n8` | 8 | 있음 | 78쌍 | 650,879 |
+| `captures_4m_r10` | 12 | 있음 | 174쌍 | 752,969 |
+| `captures_4m_r10_n17` | 17 | 있음 | 318쌍 | 1,177,574 |
+| `captures_4m_r10_n17_baseline` | 17 | 없음(바람0, GPS오차~0) | 318쌍 | 1,164,628 |
+
+- retrieval anchor 수(Na=20)가 실험 이미지 수(8~17장)보다 많아, 이 규모에서는 retrieval이 사실상 complete 그래프와 동일하게 동작(초기 `scene_graph=complete`로 돌린 결과와 포인트 수 거의 일치 — 12장 750,305 vs 752,969, 8장 652,179 vs 650,879). 대형 데이터셋(수십~수백 장)에서만 retrieval의 효율 이점이 실제로 발휘될 것으로 예상.
+- 결과 파일(`pointcloud.ply`/`poses.npy`/`focals.npy`) 전부 `C:\Users\손동한\Desktop\mast3r_results\<데이터셋명>[_retrieval]\`로 다운로드 완료 — 로컬에서 CloudCompare로 시각 비교 가능.
+- 다음 단계: 12/8/17장 결과의 포인트클라우드 밀도/노이즈를 GT(시뮬레이션 실제 지오메트리) 대비 정량 비교(ICP RMSE 등)하여 "12개가 균형점"이라는 기하학적 추정을 실측으로 검증할 것.
+
+### settings.json 프리셋 전환 방법
+
+`D:\UE_5.4\Engine\Binaries\Win64\settings.json`이 실제 활성 파일(우선순위: 커맨드라인 > 실행파일 폴더 > 실행 폴더 > `Documents\AirSim\`, `Documents` 경로는 최하위라 무시되기 쉬움 — 주의). `settings_baseline.json`(외란 없음) / `settings_disturbed.json`(바람+GPS 오차) 두 프리셋을 파일로 복사해 스왑하는 방식 사용. 전환 후 UE5 Play를 재시작해야 반영됨(런타임 중 설정 재로드 안 됨).
