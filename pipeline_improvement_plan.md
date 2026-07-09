@@ -401,6 +401,29 @@ PCA/MLS 등 로컬 표면 피팅 계열은 위치 정제 축이라 오라클 결
 > ⚠️ 위 PSNR은 전부 GS-2M의 기본 리포트(`training_utils.py`, alpha_mask 없음)로 **이미지 전체 기준**이며
 > `eval_mesh_4m_old_v2.py`의 GT bbox 크롭 방식과는 다른 지표.
 
+## ⑫ swin-5 vs retrieval-20-5 × raw vs filtered(k1.4) 4개 조합 최종 메시 검증 (2026-07-09)
+
+> 배경: 지금까지 filtered(k1.4) 메시 단계 검증은 retrieval-20-5에서만 수행됨 (§3 "최종 메시 단계 검증"). swin-5+filtered는 누락돼 있었음 → 4개 조합(2×2)을 전부 채워 비교.
+
+### 실행
+- swin-5 `pointcloud_filtered_k1.4.ply`는 이미 서버에 존재(§3 필터링 당시 swin-5/retrieval 둘 다 생성해둠) → COLMAP `points3D.txt`만 새로 변환(`cameras.txt`/`images.txt`는 raw swin-5 dir와 동일 재사용, 카메라 포즈는 필터링과 무관하므로 안전).
+- `real_test_4m_old__colmap_filtered_k1.4` → GS-2M 30k 학습(1시간 20분, train PSNR 31.20) → `render.py --extract_mesh --skip_test`(voxel_size 등 자동 계산, §4번 원칙 그대로) → `tsdf_post.ply`(7,838,253 V).
+- 4개 전부 `eval_mesh_4m_old_v2.py <mesh> <poses.npy> <label>`로 동일 기준 재평가(GT 카메라 위치 기반 Umeyama, GT 큐브 5개 bbox+margin crop, CD/F@1·5·10cm).
+
+### 결과
+
+| | raw | filtered(k1.4) |
+|---|---|---|
+| **swin-5** | CD 18.05cm / F@1,5,10cm = 0, 0, 0 (crop 내 355/200,000점=0.2%) | **CD 4.20cm** / F@1cm 0.1809 / F@5cm 0.4652 / F@10cm 0.8085 (crop 내 7,843개=3.9%) |
+| **retrieval-20-5** | CD 2.46cm / F@1cm 0.3545 / F@5cm 0.7068 / F@10cm 0.9894 | CD 2.43cm / F@1cm 0.3767 / F@5cm 0.7102 / F@10cm 0.9901 |
+
+### 해석
+
+- **swin-5 raw는 사실상 박스 복원 실패** — F-score 전부 0, crop 영역에 점이 거의 없음(0.2%). 필터링 적용 시 CD가 18.05→4.20cm로 극적으로 개선되고 F-score도 정상 범위로 회복(3.9%).
+- **retrieval-20-5는 필터링 효과가 미미**(§3 기존 결론 그대로, CD -1.2%) — raw 자체가 이미 잘 복원돼 있었기 때문.
+- **결론**: "필터링 효과가 작다"는 §3/§9의 기존 결론은 **retrieval-20-5 한정**이었다. SfM 품질이 나쁜(swin-5처럼 사슬형 그래프로 국소 밀도 왜곡이 있는) 데이터에서는 필터링이 복원 성패 자체를 좌우하는 핵심 변수가 될 수 있음. retrieval-20-5가 swin-5보다 전반적으로 우월하다는 기존 결론(§②)은 유지되며, 오히려 이번 결과로 더 강화됨(swin-5는 필터링 없이는 아예 실패).
+- **원인 미확인 (후속 조사 후보)**: 왜 swin-5 raw만 박스 영역에 점이 거의 없었는지(과밀 중복 표면이 GS-2M densification을 방해했는지, 혹은 다른 병리적 초기화 문제인지)는 미조사. voxel dedup+SOR이 우연히 이를 해소한 것으로 보이나 근본 원인은 불명.
+
 ### 박스 크롭 CD/F-score 재평가 — PSNR 순위가 완전히 뒤집힘 (2026-07-07)
 
 `eval_mesh_4m_old_v2.py`(GT 박스 5개 메시(Cube8~12)에 crop margin 0.3 적용, pred mesh를 그 bbox로 크롭 후 CD/F-score)로
