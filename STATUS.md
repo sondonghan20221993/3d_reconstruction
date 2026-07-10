@@ -1,8 +1,149 @@
-# 현재 작업 현황 (2026-06-29)
+# 현재 작업 현황 (2026-07-10)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 실제 드론 데이터 복원 진행 중 (2026-06-29)
+## 현재 상태: 4m_old 그림자 요철 복원 — confidence완화 기각, Dense MVS 부분성공(표면↑ but 요철오염 여전), 다음은 외과적 union 또는 clahe+dense 검토 (2026-07-10)
+
+---
+
+## 9. 4m_old 박스 복원 버그 수정 + 그림자 전처리 실험 (2026-07-10)
+
+### ⓪ 배경: 7/5 이후 박스 소실 버그 진단·수정
+
+4m_old(17장 시뮬)에서 6/29에 성공했던 박스 복원이 7/5 이후 실행에서 **박스가 안 보이는** 문제 발생. 원인 2가지 확정:
+
+| # | 버그 | 실패값 → 수정값 | 영향 |
+|---|---|---|---|
+| 1 (주) | **COLMAP focal 스케일백 누락** | 260.4px → **979.7px** (×1920/512) | 512px 기준 focal을 1920px에 그대로 사용 → FOV 89°가 아닌 150° 어안 → 기하 뭉개짐 → TSDF 150만~420만 조각 파편화 → 1-cluster 후처리가 박스 삭제. PSNR은 31dB 나와서(가우시안 2배 보상) 지표만 보면 정상처럼 보이는 함정 |
+| 2 (부) | **`--shared_intrinsics` 누락** | 프레임별 focal 제각각 → 공유 | ATE 8.90cm → 1.86cm |
+
+> 주의: MASt3R는 실행마다 좌표계가 임의로 잡히므로 **poses.npy 값 자체가 달라지는 건 정상**(내부일관성 ATE만 보면 됨). prior PLY도 정상이었음.
+> 1번(swin5_raw)만 살아남았던 건 raw여서가 아니라 **버그 발생 전 6/29에 학습**된 산출물이었기 때문.
+
+### ① 수정 후 4-combo 결과 (retrieval vs swin × raw vs k1.4 필터)
+
+focal 979.7 + shared_intrinsics 적용, 4개 전부 박스 복원 성공.
+
+| 조합 | 전체 CD | ATE |
+|---|---|---|
+| swin_raw | 3.70cm | 1.86cm |
+| swin_k1.4 | 3.73cm | 1.86cm |
+| retr_raw | 2.80cm | 1.90cm |
+| **retr_k1.4** | **2.72cm** | 1.90cm |
+
+→ **retrieval-20-5가 swin-5보다 ~25% 우수**, k1.4 필터는 retrieval에서만 소폭 개선. 기존 "retrieval + k1.4" 채택 방향이 올바른 focal에서도 유효함 재확인.
+
+### ② 그림자 요철 개선 — 이미지 전처리 3종 실험
+
+문제: ㄷ자 오목부(요철) **그림자 영역에 prior 점이 희박**해 GS-2M이 벽을 못 세움.
+전처리 3종을 retrieval-20-5(raw)로 각각 MASt3R→GS-2M 학습. baseline = 무전처리 retr_raw.
+
+| 변형 | 출처 | 방법 |
+|---|---|---|
+| edge | 내(사용자) 아이디어 | FFT 하이패스(엣지만) |
+| gamma | Claude 추천 | γ=0.6 그림자 밝히기 |
+| clahe | Claude(GS 표준 전처리) | LAB-L에 CLAHE(clip2.0, 타일8×8) |
+
+### ③ 핵심 발견: 측정 범위별로 승자가 완전히 다름
+
+| 변형 | 전체 씬 CD | 박스(5cm) CD | 요철 CD | 요철 pred점 | 요철 정밀도(pred→gt) | 요철 void점(적을수록↑) |
+|---|---|---|---|---|---|---|
+| baseline | **2.80** | **1.76** | 8.30 | 370 | 8.87cm | 107 |
+| gamma | 2.76 | 2.02 | 9.19 | 376 | 8.67cm | 114 |
+| clahe | 4.08 | 2.34 | 6.46 | 514 | 7.15cm | 117 |
+| edge | 11.01 | 2.36 | **5.65** | **648** | **4.78cm** | **63** |
+
+- **밝은 박스 표면**: baseline 최고 (전처리는 노이즈만 추가)
+- **그림자 요철(점-거리 지표)**: edge > clahe >> baseline > gamma
+- edge는 **전역 최악(11cm, 배경 쓰레기 웹)·요철 국소 최고** → 그대로는 못 씀
+
+### ④ 결정적: CD가 이 데이터셋의 시각품질 지표로 부적합
+
+육안(CloudCompare)으로 본 오목부 형상 충실도:
+- **clahe = 최고**: 외곽선은 거칠지만 오목부가 또렷이 열려 벽·틈이 명확 (ㄷ자 가장 정확)
+- **edge**: 표면 매끈하나 **안쪽 코너를 둥글려 오목부를 메꿈**(형상 뭉개짐) — "그림자 연결돼 보임"의 정체
+- **gamma**: 쪼그라들고 녹은 형태 (최악)
+
+→ **CD/정밀도는 "매끈하지만 코너 뭉개짐(edge)"을 편애**하고 "거칠지만 형상정확(clahe)"에 벌점. **위상 충실도를 못 잡음.** README 1차 기준이 "시각적 품질"이므로 **clahe가 실질 승자**(사용자 첫 직감과 일치).
+
+정리:
+- 형태 충실도(육안, 오목부): **clahe > edge > gamma**
+- 표면 매끄러움: edge > gamma > clahe
+- 평균 CD: baseline > gamma > clahe > edge (형상충실도와 역상관 → 신뢰 부적합)
+
+### ⑤ 산출물 위치
+
+- 서버: `real_test_4m_old__colmap_retr_{edge,gamma,clahe}_raw__gs2m/` (메시), `real_test_4m_old__mast3r_retr_{edge,gamma,clahe}/` (prior)
+- 평가 스크립트: `eval_mesh_boxcrop.py`(박스 타이트), `eval_mesh_notch.py`(요철), `eval_notch_precision.py`(정밀도/재현율/void 분리)
+- 전처리: `preprocess_3variants.py` / 파이프라인: `run_3variants_full.sh`
+- 윈도우 바탕화면: `4m_old_prep_mesh_{edge,gamma,clahe}.ply`, `4m_old_prep_prior_*.ply`
+
+### ⑥ 다음 스텝 (clahe 후속, 미실행)
+
+clahe 강점(국소대비→그림자 형상) 유지 + 약점(거친면·배경쓰레기) 제거:
+1. **clahe + bilateral 디노이즈**: 엣지보존하며 표면 노이즈만 제거 (최우선)
+2. **clahe_soft**: clip1.5 + 타일16 + γ0.8 (완만한 그림자회복)
+3. **clahe 마스킹**: 그림자 픽셀에만 적용, 밝은면·배경 원본 (배경오염 차단)
+4. **clahe prior + k1.4 필터**: 이미지 재처리 없이 배경 쓰레기 정리 (제일 쌈, GS-2M 1회)
+
+### ⑦ 요소별 순차 실험 — confidence 완화 기각, Dense MVS 부분 성공 (2026-07-10)
+
+**동기**: "raw에서 할 수 있는 최대한의 전처리를 시도 → 유의미한 결과 앙상블" 방침 확정.
+축 분류: ①이미지 전처리(위 ②에서 완료) ②MASt3R confidence 완화 ③Dense MVS(점 채우기) ④GS 단계 내부 튜닝 ⑤평가지표.
+
+**② confidence 완화 — 기각.**
+`min_conf_thr` 1.5→1.0→0.5로 완화(매칭 캐시 재사용, 재매칭 없음), notch bbox 내 점 개수 측정:
+
+| min_conf_thr | notch 점 | void 점 |
+|---|---|---|
+| 1.5(기존) | 1,750 | 697 |
+| 1.0 | 1,750 | 697 |
+| 0.5 | 1,747 | 698 |
+
+완화로 늘어난 점(1.3만~2.3만)은 전량 notch 바깥(배경)에 낙하 → **그림자는 confidence 문제가 아니라 애초에 매칭 신호 자체가 없음**. GS 재학습 없이 폐기.
+
+같은 방식으로 ①(edge/gamma/clahe) prior도 재검증: notch 점 raw 1,750 > gamma 1,610 > clahe 1,599 > edge 762.
+**raw가 이미 notch 점 최다** — clahe의 시각적 우위는 prior 커버리지가 아니라 GS 단계 photometric 최적화 효과로 재해석.
+
+**③ Dense MVS(COLMAP patch_match_stereo + stereo_fusion) — 부분 성공.**
+raw prior의 sparse COLMAP 모델(포즈 고정) 위에 dense stereo를 얹어 점을 채움. 디버깅 중 숨은 기본값 문제 3개 발견:
+- `depth_min/max` 미지정 시 실패 → 카메라 좌표계 깊이 분포(1~99%ile)로 수동 계산해 지정
+- `write_consistency_graph`(기본 `0`) 꺼져있으면 fusion이 무조건 0점 반환
+- `StereoFusion.min_num_pixels`(기본 5)가 17장 sparse-view(넓은 베이스라인)엔 과함 → 2도 0점, **1로 낮춰야** 함(어차피 cross-view consensus는 patch_match 단계의 `filter_min_num_consistent=2`에서 이미 적용됨, fusion에서 또 요구하면 이중 필터링)
+
+결과(voxel 다운샘플 후 147만점 vs 450만점 비교):
+
+| | notch 점 | void 점 | notch/void |
+|---|---|---|---|
+| sparse raw(기존) | 1,750 | 697 | 2.51 |
+| dense(voxel_mult 6.0, 147만점) | 1,611 | 481 | 3.35 — but notch **절대량 기존보다 감소** |
+| **dense(voxel_mult 2.8, 450만점)** | **5,051** | 1,536 | 3.29 |
+| dense(무압축, 1030만점) | 9,001 | 2,665 | 3.38 |
+
+voxel 다운샘플은 공간적으로 균일해서 세게 걸면 notch 이득이 사라짐 → 450만점 버전 채택, `colmap_dense_raw` 빌드 후 GS-2M 학습(**raw baseline과 동일 파라미터**: `--iterations 30000`, 추가 플래그 없음).
+
+**최종 메시 지표 (raw baseline vs dense_raw, 동일 crop):**
+
+| 지표 | raw baseline | dense_raw |
+|---|---|---|
+| notch mesh 점 수 | 370 | 587 (+59%) |
+| notch CD | 8.30cm | 8.45cm |
+| notch F@5cm | 0.358 | 0.367 |
+| notch 정밀도(pred→gt) | 8.87cm | 9.42cm |
+| notch 재현율(gt→pred) | 7.73cm | 7.48cm |
+| notch spurious>5cm | 62.4% | 64.2% |
+| **void(열린 입) floater 점** | 107 | **193 (+80%)** |
+| 전체 box CD | 3.78cm | 3.77cm |
+
+**해석**: notch 점은 늘었지만(+59%) void 가짜 floater도 비슷하거나 더 늘어(+80%) 지표상 우열 불명확 — dense fusion이 그림자 표면과 빈 공간 노이즈를 구분 없이 같이 채웠기 때문(전역 union의 한계).
+육안 확인(CloudCompare, 사용자 보고): **"표면은 dense가 더 좋게 나옴, 다만 요철 부분 오염은 여전함"** — 정량 지표(void floater 증가)와 일치하는 소견.
+
+**다음 후보 (미실행)**:
+1. **외과적 union**: dense 점을 notch bbox로만 crop + 로컬 outlier 제거 → raw baseline prior(전역 검증됨)에 patch로만 삽입, 나머지 씬은 오염 없이 유지
+2. **clahe 이미지로 Dense MVS 재시도**: clahe가 대비를 살려 매칭 신호가 원본보다 강할 수 있어 floater가 raw보다 적을 가능성
+3. ④(GS 내부: densify 완화, depth/normal prior, opacity entropy) — 아직 미착수
+
+**산출물**: 서버 `real_test_4m_old__colmap_dense_raw__gs2m/`, dense 점구름 `real_test_4m_old__colmapfix_retr_raw/dense/fused_ds.ply`(450만점). 윈도우 바탕화면 `4m_old_dense_raw.ply`, `4m_old_raw_baseline.ply`.
 
 ---
 
