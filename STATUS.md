@@ -2,7 +2,7 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 4m_old 그림자 요철 — **최종 확정 `unionicp_D2` (full CD 2.27cm 신기록, void≈0)**. 파이프라인: MVS→ICP정합→anchored union→GS-2M→TSDF(trunc½). 남은 이슈: 배경 메시 파편화(수정시도 3건 전부 역효과, 수용). 육안 검증 대기 (2026-07-11)
+## 현재 상태: 4m_old 그림자 요철 — **denseicp(ICP정합 dense prior + opacity_reduce) = 온전 메시 중 전 지표 최고(full CD 2.70)**, 육안 검증 대기. 파편화 원인 규명(가우시안 >380만) 완료 (2026-07-11)
 
 ---
 
@@ -239,6 +239,48 @@ dense→sparse 최근접거리 median **15cm(실측)** — 같은 월드좌표�
 
 3. **`densify_grad_threshold` 2배(의도적 변경) 재학습**: 가우시안 598만→382만 감소는 의도대로 됐으나 파편화 여전(55만 클러스터), 지표 전면 악화(full CD 2.79~2.86, void 919~1,091). 용량 부족으로 표면 품질만 하락 → 기각. **unionicp 원본 런이 3연속 방어** — 파편화 "수정" 시도(prior 다운샘플·TSDF 굵게·densify 억제) 전부가 오히려 악화. 파편화는 배경 한정 문제로 두고 수용.
 4. **clahe 이미지 × MVS 프로브**(GS 학습 없이 prior만 비교): clahe-MVS+ICP notch 9,817 / void 137 vs raw-MVS+ICP notch 9,961 / void 56 — **raw가 동급 커버리지 + 더 깨끗**. 계통 오프셋도 clahe에 동일 존재(|t|≈0.052). MVS 단계에서 raw가 이미 notch를 포화시켜 clahe 이득 없음 → GS 학습 생략하고 기각. (clahe의 가치는 sparse-prior-only 파이프라인의 photometric 품질에 한정)
+
+**⑨-8. 육안 판정: unionicp 전체 불합격 → double-shell 가설 → dense-우선 union 재실험 (2026-07-11)**
+
+사용자 CloudCompare 판정:
+- `raw_baseline`·`dense_D2_trunc2x`: 금간 결손 (각각 그림자 점부족 / trunc½ 트레이드오프 — 예상 내)
+- `dense_raw`: 형태 이상 (20cm 오프셋 미교정 — 예상 내, ICP 발견과 일치)
+- **`unionicp` 3종 전부: "싹다 손상"** — 파편화가 배경뿐 아니라 박스까지 침범. **정량 신기록(CD 2.27)이 시각적으로 무의미 → §④(CD≠시각품질)의 재확인. unionicp 시각 기준 불합격.**
+
+**double-shell 가설**: 순수 dense prior(dense_raw)는 메시 온전(250만 vertex 생존, 육안 "표면 좋음")했는데 union만 파편화 →
+sparse층+dense층이 ICP 잔차(~2cm)만큼 어긋난 **이중 껍질**로 같은 표면을 덮어 TSDF가 두 껍질 사이에서 간섭·분열.
+
+**대응 1 — dense-우선 union (기각)**: union 방향 반전(dense_icp 427만 + dense에서 먼 sparse 78만 = 단일 껍질 527만점) 재학습 → **여전히 파편화**(45만 클러스터, 가우시안 634만), void 1,885~2,381로 악화. **double-shell 가설 기각**.
+
+**⑨-9. 파편화의 진짜 판별 변수 = 최종 가우시안 수 (2026-07-11)**
+
+| 런 | 최종 가우시안 | 파편화 | 비고 |
+|---|---|---|---|
+| raw_baseline | 96만 | 없음 | |
+| dense_opred | 130만 | 없음 | **육안 합격("표면 좋음")** |
+| dense_raw | 168만 | 없음 | init 450만→168만 (오프셋 탓 표면 밖 점 자동 prune) |
+| dgt2x | 382만 | 파편화 | |
+| unionicp/unionds/densefirst | 598~634만 | 파편화 | ICP 정합 후엔 점들이 표면 위라 생존→과증식 |
+
+**역설 발견**: 20cm 오프셋이 사실상 "자연 prune" 역할을 했음 — 정합하면 prior가 다 살아남아 가우시안이 4~6배 불어나고, 17장 nadir 씬에서 600만 가우시안은 TSDF 파편화를 유발. **경계는 약 170만~380만 사이**.
+
+**⑨-10. 해결: denseicp(정합 prior + opacity_reduce) — 온전 메시 중 전 지표 최고 (2026-07-11)** ⭐
+
+육안 합격 레시피(dense_opred: 30k + `use_opacity_reduce`)에서 prior만 ICP 정합본(`fused_ds_icp.ply`, 450만점)으로 교체한 단일변수 실험:
+- **가우시안 101만** (opacity_reduce가 과증식 억제 — 예상 적중), **파편화 없음**(322만 중 266만 vertex 생존)
+
+| 지표 | raw_baseline | dense_opred | **denseicp_D2** |
+|---|---|---|---|
+| full CD | 2.80cm | 2.77cm | **2.70cm** |
+| box CD | 3.78cm | 3.70cm | **3.65cm** |
+| notch CD | 8.30cm | 8.18cm | **8.00cm** |
+| notch F@5cm | 0.358 | 0.374 | **0.400** |
+| void 점 | **107** | 186 | 177~188 |
+
+**온전한(비파편화) 메시 중 전 지표 최고.** 시각 검증 대기 (`4m_old_results/1_final/4m_old_denseicp_{default,D2}.ply`).
+
+**최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
+핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
 
 **바탕화면 산출물**: `4m_old_unionicp_default.ply`, `4m_old_unionicp_D2.ply`, `4m_old_unionicp_D2_c30.ply` (+기존 `4m_old_dense_D2_trunc2x.ply`).
 
