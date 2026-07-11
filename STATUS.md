@@ -2,7 +2,7 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 4m_old 그림자 요철 복원 — confidence완화 기각, Dense MVS 부분성공(표면↑ but 요철오염 여전), 다음은 외과적 union 또는 clahe+dense 검토 (2026-07-10)
+## 현재 상태: 4m_old 그림자 요철 — **최종 확정 `unionicp_D2` (full CD 2.27cm 신기록, void≈0)**. 파이프라인: MVS→ICP정합→anchored union→GS-2M→TSDF(trunc½). 남은 이슈: 배경 메시 파편화(수정시도 3건 전부 역효과, 수용). 육안 검증 대기 (2026-07-11)
 
 ---
 
@@ -138,12 +138,111 @@ voxel 다운샘플은 공간적으로 균일해서 세게 걸면 notch 이득이
 **해석**: notch 점은 늘었지만(+59%) void 가짜 floater도 비슷하거나 더 늘어(+80%) 지표상 우열 불명확 — dense fusion이 그림자 표면과 빈 공간 노이즈를 구분 없이 같이 채웠기 때문(전역 union의 한계).
 육안 확인(CloudCompare, 사용자 보고): **"표면은 dense가 더 좋게 나옴, 다만 요철 부분 오염은 여전함"** — 정량 지표(void floater 증가)와 일치하는 소견.
 
-**다음 후보 (미실행)**:
-1. **외과적 union**: dense 점을 notch bbox로만 crop + 로컬 outlier 제거 → raw baseline prior(전역 검증됨)에 patch로만 삽입, 나머지 씬은 오염 없이 유지
-2. **clahe 이미지로 Dense MVS 재시도**: clahe가 대비를 살려 매칭 신호가 원본보다 강할 수 있어 floater가 raw보다 적을 가능성
-3. ④(GS 내부: densify 완화, depth/normal prior, opacity entropy) — 아직 미착수
+**다음 후보**:
+1. **외과적 union**: dense 점을 notch bbox로만 crop + 로컬 outlier 제거 → raw baseline prior(전역 검증됨)에 patch로만 삽입, 나머지 씬은 오염 없이 유지 (미실행)
+2. **clahe 이미지로 Dense MVS 재시도**: clahe가 대비를 살려 매칭 신호가 원본보다 강할 수 있어 floater가 raw보다 적을 가능성 (미실행)
+3. ④(GS 내부: densify 완화, depth/normal prior, opacity entropy) — 아래 실행함
 
 **산출물**: 서버 `real_test_4m_old__colmap_dense_raw__gs2m/`, dense 점구름 `real_test_4m_old__colmapfix_retr_raw/dense/fused_ds.ply`(450만점). 윈도우 바탕화면 `4m_old_dense_raw.ply`, `4m_old_raw_baseline.ply`.
+
+### ⑧ GS-2M 내부 floater 억제 옵션(`use_opacity_reduce`) 실험 — 효과는 있으나 미미 (2026-07-10)
+
+**배경**: 외부 논문 조사(DN-Splatter/2D-SuGaR, adaptive densification+planar prior, GSurf/StableGS opacity entropy, G4Splat/Gaussian Scenes 생성모델)로 ④(GS 내부 튜닝) 방향을 구체화하려던 중,
+GS-2M 코드 확인 결과 **depth-normal 일관성 손실은 이미 기본값으로 전 실험(raw/dense 포함)에 적용 중이었음**을 발견(`lambda_depth_normal=0.03`, `lambda_multi_view=1.0`, `geometry_from_iter=5000` — 이미 5000~30000 iter 구간 내내 활성).
+반면 **`use_opacity_reduce`(500 iter마다 opacity를 0.8로 캡 — "Periodically reduce opacity to remove floaters" 주석)는 기본값 `False`로, 지금까지 모든 런에서 꺼진 채였음** → dense MVS의 void floater 문제(②참고, +80%)에 정확히 대응하는 미사용 레버 발견.
+
+**실험**: `colmap_dense_raw`(dense MVS prior, ⑦ 참고) 소스에 `--use_opacity_reduce` 플래그 하나만 추가, 나머지 파라미터(`--iterations 30000`) 동일 유지하고 재학습.
+
+| 지표 | raw baseline | dense_raw | **dense_opred** |
+|---|---|---|---|
+| notch mesh 점 | 370 | 587 | 562 |
+| notch CD | 8.30cm | 8.45cm | **8.18cm**(최고) |
+| notch F@5cm | 0.358 | 0.367 | **0.374**(최고) |
+| notch spurious>5cm | 62.4% | 64.2% | 62.1%(최소) |
+| **void floater 점** | **107** | 193 | 186 |
+| 전체 box CD | 3.78cm | 3.77cm | 3.78cm |
+
+**결론**: notch 지표 전반이 소폭 개선되고 void floater도 193→186로 약간 줄었으나, **raw baseline(107)에는 한참 못 미침** — 효과는 실재하나 결정적이지 않음.
+원인 추정: opacity 상한 캡은 "순한 감쇠"라 이미 자리잡은 floater를 확실히 제거하지 못함(GSurf/StableGS의 진짜 entropy 정규화 항보다 약한 메커니즘). 하이퍼파라미터(`opacity_reduce_interval` 축소, cap 하향)로 더 튜닝하는 것보다, **다음 후보 1번(외과적 union)이 근본적으로 더 확실한 해법**으로 판단 — void 영역에 dense 점 자체가 안 들어가게 원천 차단.
+
+**산출물**: 서버 `real_test_4m_old__colmap_dense_raw_opred__gs2m/`.
+
+### ⑨ 보편(GT-free) 기준 전환 + **근본원인 발견: dense MVS 점구름 20cm 계통 오프셋** (2026-07-11)
+
+**방침 전환**: 사용자 지시로 "이 데이터셋 전용(GT bbox 수동 crop)" 방법 배제, **어느 씬에나 적용 가능한 보편 기준**만 사용. GT는 검증(notch/void 측정)에만 사용.
+
+**⑨-1. TSDF 재추출 실험 (D1/D2, 재학습 없음, 씬 무관 파라미터)**
+
+| 지표 | dense_opred 기준 | D1 `--filter_depth` | **D2 `sdf_trunc` ½ (6cm→3cm)** |
+|---|---|---|---|
+| notch CD | 8.18cm | 8.18 (동일) | **8.11** |
+| notch F@5cm | 0.374 | 0.374 (동일) | **0.389** |
+| 전체 box CD | 3.78cm | 3.78 (동일) | **3.67** (box-crop 기준 전체 최고) |
+
+- **D1은 no-op 코드버그**: `render.py:100` 필터 조건 `acos(|dot|) > 100°`인데 `abs()` 탓에 acos 범위가 [0°,90°] → 100°에 절대 도달 불가. 결과 바이트 동일로 확인.
+- **D2는 전 지표 개선 + 공짜(재학습 없음) + 씬 무관** → 이후 파이프라인에 기본 반영 가치.
+
+**⑨-2. GT-free 점구름 필터 2종 — 모두 기각 (정직 기록)**
+
+| 필터 | 원리 | 결과 (dense 원본: notch 5,051 / void 1,536) |
+|---|---|---|
+| PCA planarity (`pca_filter.py`) | 로컬 PCA λ3/Σλ로 비평면 산란점 제거 | notch 4,091(-19%) / void 1,512(-1.6%) — **역효과** |
+| Free-space carving (`freespace_carve.py`) | 카메라~관측표면 ray 사이 허공점 제거 (MVS depth 사용) | notch 4,720(-7%) / **void 1,536(0개 제거)** — **무효** |
+
+기각 원인이 곧 힌트였음: void 오염이 (a) 산란이 아니고(PCA 실패) (b) depth 관측과 모순도 아님(FSC 실패) → "모든 뷰가 일관되게 표면이라 믿는 매끈한 시트" = **점 자체가 계통적으로 밀려있다**는 신호.
+
+**⑨-3. 근본원인: dense 점구름 전체가 sparse 대비 강체 이동 (ICP로 발견·해결)** ⭐
+
+dense→sparse 최근접거리 median **15cm(실측)** — 같은 월드좌표인데 표면이 안 겹침. ICP(point-to-point, with_scaling) 진단:
+- 회전≈단위행렬, scale≈0.9995, **translation ≈ 20cm(실측, 주로 +z)**, fitness 0.999
+- 해석: 전 카메라가 nadir(공통 시선축)라 MVS depth의 계통 편향(~4%)이 전역 z-이동으로 나타남 (원인 미규명 — cameras.txt focal은 982.125=focals.npy×3.75로 정확히 일치 확인, focal 탓 아님. sparse 기하가 GT와 정합함은 기존 CD 2.8cm로 입증되어 있으므로 편향은 MVS 쪽. open question)
+
+**ICP 정합 적용 후 (보편 기법: dense→sparse ICP는 GT-free 표준 정합):**
+
+| prior | notch | void |
+|---|---|---|
+| sparse raw | 1,750 | 697 |
+| dense 정합 전 | 5,051 | 1,536 |
+| **dense + ICP** | **9,961 (5.7배)** | **56 (sparse의 1/12)** |
+
+→ **"void 오염"의 정체 = 오염이 아니라 20cm 밀린 진짜 표면**. ⑦~⑧에서 관찰된 dense의 void floater 문제, PCA/FSC 실패까지 전부 이 오프셋 하나로 설명됨.
+
+**⑨-4. Anchored union 파이프라인 (GT-free)**
+
+`anchored_union.py`: dense 점은 "sparse 점 반경 r 이내"일 때만 채택(r = sparse median-NN × 8, 씬 적응형) 후 sparse와 union.
+- 정합 전 채택률 0.7% → **정합 후 48.8%** (오프셋 진단의 또다른 증거)
+- union 결과: total 349만, notch **9,731**, void 753(≈sparse 자체 몫 697+dense 56)
+
+**⑨-5. union+ICP prior GS-2M 결과 — 정량 신기록 + 단, 메시 파편화 발견 (2026-07-11)**
+
+| 지표 | 기존 최고 | unionicp_default | **unionicp_D2** |
+|---|---|---|---|
+| **full CD** | 2.72cm (retr_k1.4) | 2.36cm | **2.27cm (-17%, 신기록)** |
+| full F@5cm | — | 0.783 | **0.802** |
+| box CD | 3.67cm | 2.84cm | **2.73cm** |
+| box F@5cm(실측) | 0.517 | 0.705 | **0.728** |
+| **void 메시 점** | 107(최선) | 531 | **3 (사실상 0)** |
+
+- notch CD는 18~21cm로 커 보이나 **지표 함정**: 그림자 속 바닥면이 처음으로 복원되며 pred 점이 370→2,450개로 늘었는데, GT는 큐브 표면만 있고 바닥이 없어 올바른 표면이 "먼 점"으로 계산됨(§④ CD 부적합 결론의 재현). void≈0이 진짜 신호.
+- **문제 발견**: 가우시안 598만 과증식(prior 349만점 → 통상의 3배), TSDF 메시 30만 클러스터로 파편화 → 1-cluster 후처리가 96% 삭제(400만→17만 vertex). 살아남은 최대 클러스터가 박스+주변이라 지표는 좋지만 배경이 사라짐. 좋은 지표에 "배경 삭제" 효과 일부 포함됨을 유의.
+- 30-cluster 재추출(`tsdf_post_D2_c30.ply`): CD 2.26 유지, 배경 일부 복원(36만 vertex).
+
+**⑨-6. 파편화 대응 실험 2건 — prior 다운샘플 실패, TSDF 굵게도 실패 (2026-07-11)**
+
+가설 검증 결과 둘 다 기각:
+1. **prior 다운샘플(349만→199만, notch 5,101 유지) 재학습**: 가우시안 **629만으로 오히려 증가**(밀도가 원인 아님 확정 — densification 동역학이 원인), 전 지표 악화(full CD 2.79~2.94, void 830~1,109). 그림자 초기화만 약화시켜 순손해.
+2. **TSDF voxel 2배 굵게 재추출(D3: trunc 4×, D4: trunc 2×)**: 클러스터 9만/6.3만으로 여전히 파편화, 지표는 D2 수준(2.29~2.37), void는 D2보다 나쁨(395~471). 추출 단계 조정 한계 확인.
+
+→ **확정 최고: `unionicp_D2`** (full CD 2.27, void 3). 파편화의 남은 정공법 = **densification 자체 억제**.
+
+**⑨-7. 마지막 2건 — densify 억제 기각, clahe×MVS 프로브 기각 (2026-07-11)**
+
+3. **`densify_grad_threshold` 2배(의도적 변경) 재학습**: 가우시안 598만→382만 감소는 의도대로 됐으나 파편화 여전(55만 클러스터), 지표 전면 악화(full CD 2.79~2.86, void 919~1,091). 용량 부족으로 표면 품질만 하락 → 기각. **unionicp 원본 런이 3연속 방어** — 파편화 "수정" 시도(prior 다운샘플·TSDF 굵게·densify 억제) 전부가 오히려 악화. 파편화는 배경 한정 문제로 두고 수용.
+4. **clahe 이미지 × MVS 프로브**(GS 학습 없이 prior만 비교): clahe-MVS+ICP notch 9,817 / void 137 vs raw-MVS+ICP notch 9,961 / void 56 — **raw가 동급 커버리지 + 더 깨끗**. 계통 오프셋도 clahe에 동일 존재(|t|≈0.052). MVS 단계에서 raw가 이미 notch를 포화시켜 clahe 이득 없음 → GS 학습 생략하고 기각. (clahe의 가치는 sparse-prior-only 파이프라인의 photometric 품질에 한정)
+
+**바탕화면 산출물**: `4m_old_unionicp_default.ply`, `4m_old_unionicp_D2.ply`, `4m_old_unionicp_D2_c30.ply` (+기존 `4m_old_dense_D2_trunc2x.ply`).
+
+**확립된 보편 파이프라인(요약)**: MASt3R sparse → COLMAP dense MVS(`__all__` cfg, depth범위 자동, consistency graph on, min_num_pixels=1) → **dense→sparse ICP 정합** → **anchored union**(r=8×median-NN) → GS-2M(동일 파라미터) → TSDF(D2: sdf_trunc=2×voxel). GT 사용 단계 없음.
 
 ---
 
