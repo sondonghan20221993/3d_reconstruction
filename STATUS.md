@@ -279,6 +279,19 @@ sparse층+dense층이 ICP 잔차(~2cm)만큼 어긋난 **이중 껍질**로 같�
 
 **온전한(비파편화) 메시 중 전 지표 최고.** 시각 검증 대기 (`4m_old_results/1_final/4m_old_denseicp_{default,D2}.ply`).
 
+**⑨-11. Retinex(MSR) 전처리 프로브 — 기각, 전처리 축 종결 (2026-07-12)**
+
+CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단조 변환인 Retinex(MSR 3-scale, σ=15/80/250)로 마지막 시도. GS 학습 없이 2단 프로브만:
+
+| 프로브 | retinex | raw 기준 | 판정 |
+|---|---|---|---|
+| ① MASt3R prior notch/void | 1,621/661 | 1,750/697 | 짐 |
+| ② MVS+ICP notch/void | 8,789/19 | 9,961/56 | notch -12%로 짐 |
+
+→ **기각 (GS 학습 생략)**. **전처리 축 완전 종결**: edge/gamma/clahe/retinex 4종 전부 기하에서 raw 패배.
+비단조 변환마저 진 것은 MASt3R·MVS가 그림자 속 가용 신호를 이미 소진하고 있다는 뜻 — **"원본이 최선"이 이 데이터셋의 결론**.
+산출물: `rgb_retinex/`(서버), `preprocess_retinex.py`, 바탕화면 `6_전처리_이미지/4m_old_prep_retinex_008.png`.
+
 **최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
 핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
 
