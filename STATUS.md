@@ -306,7 +306,32 @@ CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단
 - 전처리 4종이 모두 실패한 것과 대조: 그림자 신호를 늘리는 건 이미지 변형이 아니라 **입력 해상도**였음
 - focal 스케일백 일반화: `build_colmap_4mold_resbase.py` (base 해상도 argv[4], 768 → ×2.5 = 968.0px)
 
-**진행 중**: res768 기반 denseicp 전체 파이프라인 (`run_res768_full.sh`, tmux `di768`) — MVS(depth 0.7~4.2 재계산) → ICP → GS-2M+opacity_reduce → default/D2 추출·평가. 비교 대상: denseicp(512) full CD 2.70.
+**⑨-13. RoPE 보간으로 1024 부활 + res768 전체 파이프라인 결과 (2026-07-13)**
+
+**(a) RoPE position interpolation (naver/dust3r#62)**: 1024 붕괴 원인 = CroCo ViT의 RoPE 위치인코딩이 학습범위(512) 2배 밖에서 외삽 실패(LLM context 초과와 동일 현상). `pos_embed.py`의 `t`에 `ROPE_INTERP_SCALE`(=512/입력, 환경변수, 기본 1.0) 곱하는 패치 적용:
+
+| | 768 | 1024 원본 | **1024+RoPE(0.5)** |
+|---|---|---|---|
+| notch | 2,945 | 0 | **4,733** |
+| void | **774** | 0 | 1,554 |
+| ATE | **1.81cm** | 501cm | 1.96cm |
+
+→ 붕괴 완전 해소, notch 최다. 단 **denseicp 파이프라인에서 MASt3R의 역할은 포즈+focal+ICP타깃뿐**(기하는 1920px MVS가 생성)이라 승부처는 ATE = **768이 파이프라인용 확정**. 1024+RoPE는 sparse prior를 직접 쓰는 용례에서 가치.
+
+**(b) res768 denseicp 전체 파이프라인 결과**:
+
+| 지표 | denseicp512 | **denseicp768_D2** |
+|---|---|---|
+| **notch CD** | 8.00cm | **7.25cm (역대 최고)** |
+| **notch F@5cm** | 0.400 | **0.440 (역대 최고)** |
+| box F@1cm | 0.257 | **0.315** |
+| box CD | 3.65cm | 3.60cm |
+| void | 177~188 | 186~241 |
+| full CD | **2.70cm** | 3.35cm (후퇴) |
+| 가우시안 | 101만 | 83만 (파편화 없음 ✅) |
+
+- 타깃(그림자 요철)은 768이 전 지표 갱신. full CD 후퇴 원인 추정: 768 런의 MVS 계통 오프셋이 더 컸음(ICP fitness 0.999→0.951, |t|≈0.31 colmap) → 배경 정합 잔차.
+- **육안 판정 대기**: `1_final/4m_old_denseicp768_{default,D2}.ply` vs `4m_old_denseicp_{default,D2}.ply`(512).
 
 **최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
 핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
