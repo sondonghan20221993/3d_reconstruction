@@ -292,6 +292,22 @@ CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단
 비단조 변환마저 진 것은 MASt3R·MVS가 그림자 속 가용 신호를 이미 소진하고 있다는 뜻 — **"원본이 최선"이 이 데이터셋의 결론**.
 산출물: `rgb_retinex/`(서버), `preprocess_retinex.py`, 바탕화면 `6_전처리_이미지/4m_old_prep_retinex_008.png`.
 
+**⑨-12. MASt3R 입력 해상도 스윕 — 768 승리, sparse 천장을 올린 첫 레버 (2026-07-12)** ⭐
+
+`--image_size` 512(기본)/768/1024 프로브 (retrieval-20-5, shared_intrinsics 동일):
+
+| 해상도 | total | notch | void | ATE |
+|---|---|---|---|---|
+| 512 | 129만 | 1,750 | 697 | 1.90cm |
+| **768** | **222만** | **2,945 (+68%)** | 774(비례 이하) | **1.81cm (개선)** |
+| 1024 | 32만 | 0 | 0 | **501cm (포즈 붕괴)** |
+
+- 512 학습 모델이지만 768은 허용 범위 — notch +68% & ATE 개선. **1024는 분포 밖 → 완전 붕괴** (스위트스팟 = 768)
+- 전처리 4종이 모두 실패한 것과 대조: 그림자 신호를 늘리는 건 이미지 변형이 아니라 **입력 해상도**였음
+- focal 스케일백 일반화: `build_colmap_4mold_resbase.py` (base 해상도 argv[4], 768 → ×2.5 = 968.0px)
+
+**진행 중**: res768 기반 denseicp 전체 파이프라인 (`run_res768_full.sh`, tmux `di768`) — MVS(depth 0.7~4.2 재계산) → ICP → GS-2M+opacity_reduce → default/D2 추출·평가. 비교 대상: denseicp(512) full CD 2.70.
+
 **최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
 핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
 
