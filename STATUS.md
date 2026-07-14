@@ -131,7 +131,23 @@ python3 train.py \
 | dense_icp768 (기존 최고, 온전 메시) | MASt3R res768 | Dense MVS+ICP | GS-2M / (원래 python3.8 env) | 2.70cm |
 | **v2algo_nopior (신규)** | MASt3R res768 | ❌ 없음 (랜덤 100k init) | GS-2M-v2-algo / venv-gs2m | 측정 예정 |
 
-**다음**: 학습 완료 대기 → 메시 추출(TSDF) → CD/notch CD/void 지표 계산 → CloudCompare 육안 비교
+### ⓖ 관찰: Prior 유무에 따른 학습 속도/densification 패턴 차이 (2026-07-14 17:06)
+
+**진행 상황 체크 (9,940/30,000 iter, 33%, 21분 46초 경과 시점)**:
+| 항목 | 값 |
+|---|---|
+| Loss | 0.208~0.221 (안정적, 초기 7.04에서 크게 감소) |
+| Points | 100,000 → **4,766,922**로 급증 (densification) |
+| 속도 | 3.24 → 3.05 it/s로 계속 저하 |
+| 남은 예상 시간 | 약 1시간 50분 (총 완료 ~18:33, 애초 예상 17:05보다 크게 늦어짐) |
+
+**해석 — prior 있음/없음의 구조적 차이**:
+- `dense_icp768`(prior 있음) 런은 시작부터 ICP로 정렬된 강한 prior(수백만 개의, 이미 표면 근처에 위치한 점)를 가지고 시작 → densification이 이미 있는 점을 다듬는 정도로 상대적으로 가벼움
+- 이번 prior-free 런은 씬 전체에 균일하게 뿌려진 랜덤 100k점에서 출발 → multi-view geometry loss(`Lgeo`)만으로 "어디에 표면이 있는지"부터 찾아나가야 하므로, densification이 훨씬 공격적으로 점을 늘림(100k → 470만, 47배)
+- 포인트 수가 늘수록 rasterization 비용이 커져 iteration 속도가 지속적으로 저하(3.24→3.05 it/s) — **prior 없음은 정확도뿐 아니라 학습 시간 비용도 훨씬 크다**는 것을 시사
+- 이는 GS-2M(3DGS 계열)이 "point cloud initialization을 아예 생략할 수 있다"는 게 아니라 "어떤 형태로든 초기 점이 필요하고, 그 초기 점의 질이 densification 부담과 직결된다"는 ⓒ의 결론(구조적으로 최소 point 초기화가 필요함)을 시간 비용 측면에서도 뒷받침하는 정황 증거
+
+**다음**: 학습 완료 대기 (~18:33 예상) → 메시 추출(TSDF) → CD/notch CD/void 지표 계산 → dense_icp768과 정량/육안 비교
 
 ---
 
