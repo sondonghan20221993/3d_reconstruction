@@ -2,11 +2,11 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: **GS-2M 철학 검증 진행 중** — MASt3R 포즈 + prior 없는 원본 학습 시작 (2026-07-14 14:58 KST). Dense ICP 결과 (full CD 2.70) vs 원본 비교 예정
+## 현재 상태: **GS-2M 철학 검증 — MASt3R 기반 분석** — 라이브러리 호환 문제로 새 학습 불가, 기존 MASt3R sparse 결과로 분석 전환 (2026-07-14)
 
 ---
 
-## 10. GS-2M 원본 철학 검증: MASt3R 포즈 + Prior 없는 학습 (2026-07-14)
+## 10. GS-2M 원본 철학 검증: MASt3R 포즈 기반 분석 (2026-07-14)
 
 ### 배경: GS-2M 논문 확인 후 설계 철학 재정의
 
@@ -15,38 +15,31 @@
 - **핵심**: "completely independent of priors from pre-trained models"
 - 의도: Multi-view photometric consistency **만**으로 기하를 학습
 
-**현재까지의 작업 평가:**
-| 방법 | Prior | 특징 | 결과 |
+**현재 작업 기준 정정: MASt3R-SfM 기반으로 일원화**
+
+모든 현재 분석은 **MASt3R-SfM res768 (retrieval-20-5, shared_intrinsics)** 포즈를 기반으로 함.
+
+### 실험 설계 (수정)
+
+**원래 계획:**
+- MASt3R 포즈 + prior 없는 GS-2M 새 학습
+- **상태:** ❌ 라이브러리 호환 에러 (diff_gaussian_rasterization) → 새 학습 불가
+
+**변경 전략:**
+- 기존 **MASt3R sparse prior 포함 GS-2M 결과** 사용
+- Prior의 영향을 정량화하되, MASt3R 기반으로 일관성 유지
+
+**비교 대상 (모두 MASt3R 포즈 기반):**
+| 결과 | Prior | 특징 | CD |
 |---|---|---|---|
-| **raw_baseline** | COLMAP sparse | 기준선 | CD 2.80cm |
-| **dense_icp768** | Dense MVS + ICP | 포인트 최대화 | CD 2.70cm (신기록, 육안 손상) |
-| **원본 (진행중)** | ❌ 없음 | GS-2M 철학 충실 | 대기 중 |
+| **colmapfix_retr_raw__gs2m** | MASt3R sparse | 기준선 (prior 있음) | ? |
+| **원본 (미실행)** | ❌ 없음 | GS-2M 철학 충실 | - |
 
-### 실험 설계
+**실제 비교:**
+MASt3R 포즈만 확보된 상태에서 → prior의 실제 기여도를 정량 비교 예정
 
-**Input:**
-- 카메라 포즈: MASt3R-SfM res768 (retrieval-20-5, shared_intrinsics)
-- 이미지: raw (res 768×1024)
-- **Prior: 없음** (sparse/0/points3D.txt 제거)
-
-**Parameters (GS-2M 원본):**
-```bash
-python3 train.py \
-  -s real_test_4m_old__mast3r_res768__gs2m_origin \
-  -m real_test_4m_old__mast3r_res768__gs2m_origin__result \
-  --iterations 30000 \
-  --port 6038
-  # ❌ 추가 플래그 없음 (opacity_reduce, geometry_init 등 금지)
-```
-
-**목표:**
-1. GS-2M 원본 (prior 없음) vs dense_icp (prior 있음) 메시 품질 비교
-2. Prior의 실제 영향도 정량화
-3. 지표(CD) vs 육안 품질 일치성 재검증
-
-**상태:** 학습 시작 (PID: 2933334, 예상 완료: ~1시간)
-**로그:** `/home/sdh/Desktop/logs/gs2m_mast3r_origin.log`
-**출력:** `/home/sdh/Desktop/data/experiments/real_test_4m_old__mast3r_res768__gs2m_origin__result/`
+**상태:** 라이브러리 문제로 새 학습 중단, 기존 결과 분석으로 전환
+**다음:** MASt3R sparse 결과 메시 추출 및 지표 계산
 
 ---
 
