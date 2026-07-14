@@ -2,7 +2,7 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: **GS-2M "prior 불필요" 논문 주장 검증 완료** — 구조적으로는 참(pretrained-model prior 없이도 학습 가능, venv-gs2m 신규 구축해 실제로 돌림)이나, 이 데이터셋(17장 nadir/저텍스처)에서는 prior 없이 densification이 폭주해 TSDF 파편화로 박스가 최종 메시에서 완전히 소실됨. prior는 사실상 필수적인 정규화 장치로 결론 (2026-07-14)
+## 현재 상태: ⚠️ **ⓗ⓲의 "prior 없으면 파편화로 실패" 결론 무효화됨** — 교란변수(focal 1.5배 오류 + opacity_reduce 미사용) 발견, 통제 재실험 준비 중 (2026-07-14 23:30)
 
 ---
 
@@ -189,7 +189,39 @@ render.py --extract_mesh --skip_test --voxel_size 0.00381 --sdf_trunc 0.00762   
 → **논문 주장(구조적으로 pretrained-model prior 불필요)은 참이지만, 이 프로젝트의 실전 데이터(sparse-view, 저텍스처, 그림자)에서는 prior가 densification을 억제하는 사실상 필수적인 정규화 장치로 기능함.** "prior 없이도 된다"와 "prior 없이도 잘 된다"는 다른 명제였음.
 
 **산출물**: 서버 `real_test_4m_old__mast3r_res768__gs2m_v2algo_nopior/train/ours_30000/mesh/{tsdf_mesh,tsdf_post_default,tsdf_post_D2}.ply`
-**다음(미실행, 필요시)**: `num_clusters` 30 이상으로 재추출해 박스를 포함하는 클러스터를 되살리는 시도 — 단, §9-6에서 유사 시도(파편화 대응) 전부 실패한 선례 있음.
+
+### ⓙ ⚠️ 사용자 재검증 요청 (2026-07-14 23:27) — "진짜 prior 유무로만 학습한 게 맞는지" → **교란변수 2개 발견, ⓗ⓲ 결론 무효**
+
+ⓗ의 "prior 없으면 densification 폭주로 박스 소실" 결론을 신뢰하기 전에, denseicp768(prior 있음)과 v2algo_nopior(prior 없음)이 **정말 prior 하나만 다른지** 항목별로 직접 대조.
+
+**대조 결과**:
+
+| 변수 | denseicp768 (prior 있음) | nopior768 (prior 없음) | 동일? |
+|---|---|---|---|
+| 이미지 (md5sum) | `6b8804bf...` | `6b8804bf...` | ✅ 동일 |
+| 카메라 포즈 (images.txt) | 동일 MASt3R run | 오차 ~1e-8 (기록 정밀도 수준) | ✅ 사실상 동일 |
+| **focal** | **967.97px** | **1451.96px** | ❌ **1.5배 오류** |
+| `--use_opacity_reduce` | ✅ 사용 | ❌ 미사용 | ❌ 교란변수 |
+| `prune_init_points` | True(원본) | False(패치) | ❌ 경미한 교란 |
+| 학습 환경 | conda `gs2m` (원본 파이프라인) | `venv-gs2m` (신규 구축) | 별개 빌드, 코드는 동등 확인됨 |
+
+**치명적 원인 — focal 스케일백 버그 재발**:
+`nopior768`은 `build_colmap_4mold_sharedfix.py`로 COLMAP 변환했는데, 이 스크립트는 `focal × (1920/512)`를 **하드코딩**함. 그러나 입력 소스(`mast3r_retr_res768`)의 `focals.npy`는 **768 스케일**이었음:
+```
+387.19 × 1920/512 = 1451.96px  ← nopior768이 실제로 사용한 값 (틀림)
+387.19 × 1920/768 =  967.97px  ← denseicp768/colmap_res768과 정확히 일치 (맞는 값)
+```
+→ **FOV가 실제(~89°)보다 훨씬 좁게(~67°) 잘못 설정된 카메라로 학습됨.**
+
+이는 §⓪에 기록된 **2026-07-05 "박스 소실" 버그(focal 스케일백 누락 → FOV 왜곡 → 기하 뭉개짐 → TSDF 파편화 → 1-cluster 후처리가 박스 삭제)와 실패 시그니처가 완전히 동일**함. PSNR이 정상으로 나온 것도(가우시안 과다 배치로 보상) 그때와 같은 패턴.
+
+**결론**: ⓗ/ⓘ에서 내린 "prior 없이는 densification이 폭주해 실패한다"는 결론은 **prior 부재 때문인지 focal 오류 때문인지 분리되지 않은 채 내려진 것 — 신뢰 불가, 철회**. opacity_reduce 미사용도 추가 교란(denseicp768은 opacity_reduce로 가우시안 101만개로 억제됐는데 nopior768엔 이 억제 장치가 아예 없었음 — "prior 없음"의 효과와 "억제장치 없음"의 효과가 섞임).
+
+**다음: 통제된 재실험 준비** — denseicp768과 **prior 유무만** 다르게:
+1. focal을 967.97px로 수정한 COLMAP 디렉토리 재생성 (`build_colmap_4mold_resbase.py` 사용 또는 `colmap_res768`의 cameras.txt 재사용)
+2. `--use_opacity_reduce` 플래그 포함 (denseicp768과 동일)
+3. `prune_init_points`는 prior 없는 조건 자체가 요구하는 최소 수정이므로 유지(0점 방지 목적, 학습 동작상 영향 미미 — outlier 초기점이 애초에 없으므로)
+4. venv-gs2m 환경 유지 (코드 동등성 이미 확인됨)
 
 ---
 
