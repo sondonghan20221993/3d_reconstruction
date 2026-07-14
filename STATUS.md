@@ -2,7 +2,7 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: **GS-2M 철학 검증 — MASt3R 기반 분석** — 라이브러리 호환 문제로 새 학습 불가, 기존 MASt3R sparse 결과로 분석 전환 (2026-07-14)
+## 현재 상태: **GS-2M "prior 불필요" 논문 주장 검증 완료** — 구조적으로는 참(pretrained-model prior 없이도 학습 가능, venv-gs2m 신규 구축해 실제로 돌림)이나, 이 데이터셋(17장 nadir/저텍스처)에서는 prior 없이 densification이 폭주해 TSDF 파편화로 박스가 최종 메시에서 완전히 소실됨. prior는 사실상 필수적인 정규화 장치로 결론 (2026-07-14)
 
 ---
 
@@ -147,7 +147,49 @@ python3 train.py \
 - 포인트 수가 늘수록 rasterization 비용이 커져 iteration 속도가 지속적으로 저하(3.24→3.05 it/s) — **prior 없음은 정확도뿐 아니라 학습 시간 비용도 훨씬 크다**는 것을 시사
 - 이는 GS-2M(3DGS 계열)이 "point cloud initialization을 아예 생략할 수 있다"는 게 아니라 "어떤 형태로든 초기 점이 필요하고, 그 초기 점의 질이 densification 부담과 직결된다"는 ⓒ의 결론(구조적으로 최소 point 초기화가 필요함)을 시간 비용 측면에서도 뒷받침하는 정황 증거
 
-**다음**: 학습 완료 대기 (~18:33 예상) → 메시 추출(TSDF) → CD/notch CD/void 지표 계산 → dense_icp768과 정량/육안 비교
+### ⓗ 학습 완료 + 메시 추출 + 최종 비교 (2026-07-14 19:04~19:35) ⭐ 결론
+
+**학습 완료**: 30,000/30,000 iter, 총 소요 **2시간 18분 43초** (16:44:12 → 19:02:57), 최종 PSNR 35.60, L1 0.0110, 가우시안 5,287,089개.
+
+**메시 추출 (dense_icp768과 완전히 동일한 파라미터로, `run_res768_full.sh` 재사용)**:
+```bash
+render.py --extract_mesh --skip_test                                    # default (voxel/sdf_trunc 자동)
+render.py --extract_mesh --skip_test --voxel_size 0.00381 --sdf_trunc 0.00762   # D2
+```
+
+| 지표 | default | D2 |
+|---|---|---|
+| TSDF raw mesh vertex | 2,171,947 | 1,802,122 |
+| 클러스터 수 | 162,462 | 155,619 |
+| **1-cluster 후처리 생존 vertex** | 160,316 (7.4%) | 47,585 (2.6%) |
+
+**⚠️ 파편화가 기존 unionicp 사례(§9-5, ~96% 삭제)보다 더 심각** — 가우시안 528만 개는 STATUS.md에 기록된 파편화 임계값(170만~380만) 대비 훨씬 큼.
+
+**결정적 확인 (box crop 진단)**: `eval_mesh_boxcrop.py`로 GT 박스 영역 크롭 시 post-processed 메시(default/D2 둘 다) **박스 영역 point 0개(0.0%)**. 원인 추적을 위해 1-cluster 후처리 **이전** 전체 메시(`tsdf_mesh.ply`, 180만 vertex)에 동일 크롭 적용 → **383/200,000 (0.19%) 는 박스 영역에 존재**함을 확인.
+→ **결론: 학습 자체는 박스 형태를 어느 정도 잡았으나(전체 메시엔 흔적 존재), "가장 큰 단일 연결 클러스터"를 고르는 1-cluster 후처리에서 박스가 아닌 다른(배경 추정) 조각이 선택되어 최종 메시에서 박스가 통째로 소실됨.** 이는 §9-8의 "정량 신기록이 시각적으로 무의미"보다 더 심각한 실패 모드 — 박스가 아예 존재하지 않음.
+
+**최종 정량 비교 (동일 소스: MASt3R-SfM res768, retrieval-20-5, poses.npy 공유)**:
+
+| 지표 | **denseicp768 (prior 있음)** | **v2algo_nopior (prior 없음)** |
+|---|---|---|
+| 학습 시간 | 30k iter (opacity_reduce 포함) | 30k iter, **2h18m43s** (prior 있는 쪽보다 densification 부담 커 훨씬 느릴 것으로 추정, 직접 시간 비교는 미기록) |
+| 최종 가우시안 수 | 1,010,000 (opacity_reduce로 억제됨) | **5,287,089** (5.2배, 억제 수단 없음) |
+| 파편화 | 없음 (322만 중 266만 vertex 생존) | **심각** (7.4%/2.6% 생존, 박스 자체가 최대 클러스터에서 누락) |
+| full CD (default) | 2.77cm | 측정 불가 (박스 crop 0점) |
+| full CD (D2) | **2.70cm** | 측정 불가 (박스 crop 0점) |
+| box CD | 3.65~3.70cm | **nan** (crop 0/200,000) |
+| notch CD | 8.00~8.18cm | **측정 불가** (notch crop도 pred=0) |
+| void 점 | 177~188 | N/A (박스 자체가 없어 무의미) |
+
+### ⓘ 최종 결론 — "GS-2M은 prior가 필요없다"는 논문 주장에 대한 검증 결과
+
+1. **구조적 요구사항 확인 (ⓒ)**: GS-2M(PGSR/3DGS 계열)은 **point cloud initialization 자체는 반드시 필요**함(0점이면 `distCUDA2` 커널이 크래시). 논문의 "prior-independent"는 **depth/normal supervision에 pretrained model을 쓰지 않는다**는 의미였고, "point cloud init을 생략할 수 있다"는 뜻이 아니었음 — 랜덤 100k 점으로 대체하면 크래시는 피할 수 있음.
+2. **실전 성능 검증 (ⓗ)**: 랜덤 초기화만으로도 **photometric 품질(PSNR 35.60)은 우수**했으나, **기하학적 결과는 실패**함 — densification이 억제 없이 폭주(100k→528만)해 TSDF 추출 시 심각한 파편화가 발생했고, 관심 대상(박스)이 "가장 큰 클러스터"에서 탈락해 최종 메시에서 완전히 사라짐.
+3. **이 데이터셋(17장 nadir, 저텍스처, 그림자 요철)에서의 실질 결론**: **prior(sparse MASt3R 점 또는 dense MVS+ICP)가 사실상 densification을 억제하는 정규화 역할을 함.** prior 없이는 opacity_reduce 같은 장치 없이 가우시안이 과증식하고, 그 결과가 §9-9에서 이미 규명한 "가우시안 170만~380만 초과 시 파편화" 임계값을 완전히 벗어나 실패함.
+→ **논문 주장(구조적으로 pretrained-model prior 불필요)은 참이지만, 이 프로젝트의 실전 데이터(sparse-view, 저텍스처, 그림자)에서는 prior가 densification을 억제하는 사실상 필수적인 정규화 장치로 기능함.** "prior 없이도 된다"와 "prior 없이도 잘 된다"는 다른 명제였음.
+
+**산출물**: 서버 `real_test_4m_old__mast3r_res768__gs2m_v2algo_nopior/train/ours_30000/mesh/{tsdf_mesh,tsdf_post_default,tsdf_post_D2}.ply`
+**다음(미실행, 필요시)**: `num_clusters` 30 이상으로 재추출해 박스를 포함하는 클러스터를 되살리는 시도 — 단, §9-6에서 유사 시도(파편화 대응) 전부 실패한 선례 있음.
 
 ---
 
