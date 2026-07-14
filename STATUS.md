@@ -6,40 +6,50 @@
 
 ---
 
-## 10. GS-2M 원본 철학 검증: MASt3R 포즈 기반 분석 (2026-07-14)
+## 10. GS-2M 원본 철학 검증 (2026-07-14) — Prior 있는 버전 vs Prior 없는 버전 비교
 
-### 배경: GS-2M 논문 확인 후 설계 철학 재정의
+### ⓐ 배경: GS-2M 논문 확인 후 설계 철학 재정의
 
 **발견:**
 - GS-2M = "Material-aware Gaussian Splatting" (Eurographics 2026, Nguyen et al.)
 - **핵심**: "completely independent of priors from pre-trained models"
 - 의도: Multi-view photometric consistency **만**으로 기하를 학습
 
-**현재 작업 기준 정정: MASt3R-SfM 기반으로 일원화**
+### ⓑ 현재까지의 작업 (Prior 있는 버전) — 진행 중
 
-모든 현재 분석은 **MASt3R-SfM res768 (retrieval-20-5, shared_intrinsics)** 포즈를 기반으로 함.
+| 항목 | 구성 | 상태 |
+|---|---|---|
+| **포즈** | MASt3R-SfM res768 (retrieval-20-5, shared_intrinsics) | ✅ |
+| **Prior (3D 포인트)** | MASt3R sparse 또는 Dense MVS (ICP 정합) | ✅ |
+| **학습** | GS-2M standard (--iterations 30000, --use_opacity_reduce) | 진행 중 |
+| **출력** | `real_test_4m_old__mast3r_res768__gs2m_origin__result` (dense prior 포함) | 대기 |
 
-### 실험 설계 (수정)
+**명시**: 현재 파이프라인 **prior 의존적**. GS-2M 논문 철학과 다름.
 
-**원래 계획:**
-- MASt3R 포즈 + prior 없는 GS-2M 새 학습
-- **상태:** ❌ 라이브러리 호환 에러 (diff_gaussian_rasterization) → 새 학습 불가
+### ⓒ 새로운 계획: Prior 없는 버전 (2026-07-14 시작)
 
-**변경 전략:**
-- 기존 **MASt3R sparse prior 포함 GS-2M 결과** 사용
-- Prior의 영향을 정량화하되, MASt3R 기반으로 일관성 유지
+**목표:**
+- MASt3R-SfM 포즈 + 빈 point cloud (prior 없음)로 GS-2M 학습
+- GS-2M 논문의 원래 설계대로 작동하는지 검증
 
-**비교 대상 (모두 MASt3R 포즈 기반):**
-| 결과 | Prior | 특징 | CD |
-|---|---|---|---|
-| **colmapfix_retr_raw__gs2m** | MASt3R sparse | 기준선 (prior 있음) | ? |
-| **원본 (미실행)** | ❌ 없음 | GS-2M 철학 충실 | - |
+**기술 도전:**
+1. ✅ **해결됨**: MASt3R → COLMAP 형식 변환 (`build_colmap_4mold_sharedfix.py`)
+2. ✅ **해결됨**: points3D.txt 제거 (prior 없음 상태)
+3. 🔧 **진행 중**: GS-2M 코드가 prior 없는 상황을 지원하는지 확인
+   - `prune_init_points`: 기본값 True → False로 수정 (포인트 0개 시 처리)
+   - `_populate_neighbor_cameras`: 다음 단계 확인 필요
 
-**실제 비교:**
-MASt3R 포즈만 확보된 상태에서 → prior의 실제 기여도를 정량 비교 예정
+**실험 설계:**
+```
+Input: MASt3R-SfM res768 포즈 + 빈 point cloud
+Output: real_test_4m_old__mast3r_res768__gs2m_origin__result_nopior
+Comparison: 
+  - Prior 있는 버전 vs Prior 없는 버전
+  - CD, notch CD, void points 정량 비교
+  - 육안 품질 (CloudCompare)
+```
 
-**상태:** 라이브러리 문제로 새 학습 중단, 기존 결과 분석으로 전환
-**다음:** MASt3R sparse 결과 메시 추출 및 지표 계산
+**다음**: GS-2M 코드 수정 계속 진행 (neighbor_cameras 등)
 
 ---
 
