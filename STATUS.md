@@ -26,30 +26,51 @@
 
 **명시**: 현재 파이프라인 **prior 의존적**. GS-2M 논문 철학과 다름.
 
-### ⓒ 새로운 계획: Prior 없는 버전 (2026-07-14 시작)
+### ⓒ 환경 분리 원칙 (2026-07-14 확정) ⭐
+
+**문제 발견**: prior-free를 돌리려면 `prune_init_points`(기본값 `True`, 초기 SfM 점 중 outlier를 실제로 삭제하는 동작)를 코드 레벨에서 `False`로 바꿔야 함 — CLI 플래그로 끌 수 없는 `store_true` 인자라 코드 수정이 강제됨.
+이 수정은 단순 에러 회피가 아니라 **prior 있는 버전의 학습 동작 자체를 바꾸는 변경**이라, 같은 디렉토리에서 공유하면 "학습파라미터 동일 유지" 원칙이 깨짐 (기존 dense_icp768 결과는 `True`로 학습됨).
+
+**결론: 서버에 존재하는 두 GS-2M 디렉토리를 역할별로 완전히 분리해서 사용한다.**
+
+| 디렉토리 | 역할 | 코드 상태 | 비고 |
+|---|---|---|---|
+| **`~/Desktop/models/GS-2M`** | **Prior 있는 버전 전용** | 원본 유지 (`prune_init_points=True`). `pbr/light.py`의 `sys.path.insert` 1줄만 예외 허용(동작에 영향 없는 import 경로 수정, LD_LIBRARY_PATH 트랩과 무관하게 필요) | 기존 dense_icp768, sparse 등 모든 prior 실험이 이 디렉토리 기준 |
+| **`~/Desktop/models/GS-2M-v2-algo`** | **Prior 없는 버전(원본 철학 검증) 전용** | 자유롭게 수정 (`prune_init_points=False` 등 prior-free 대응 패치를 여기에만 적용) | git 상태 깨끗한 별도 clone. 여기서 무엇을 바꾸든 prior 버전에 영향 없음 |
+
+**실행 환경 (두 디렉토리 공통)**:
+```bash
+source ~/Desktop/venvs/venv-milo/bin/activate   # diff_gaussian_rasterization 정상 동작 확인됨 (Python 3.10)
+unset LD_LIBRARY_PATH                            # LD_LIBRARY_PATH 트랩 방지 (pipeline_strategy_3branches.md 참고)
+export CUDA_HOME=/usr/local/cuda-12.3
+```
+> venv-milo가 GS-2M CUDA 확장과 호환됨을 최초 확인 (2026-07-14). GS-2M 원래 환경(`~/.local/lib/python3.8`)은 diff_gaussian_rasterization undefined symbol 에러로 사용 불가.
+
+### ⓓ 새로운 계획: Prior 없는 버전 (GS-2M-v2-algo에서 진행)
 
 **목표:**
 - MASt3R-SfM 포즈 + 빈 point cloud (prior 없음)로 GS-2M 학습
 - GS-2M 논문의 원래 설계대로 작동하는지 검증
 
-**기술 도전:**
-1. ✅ **해결됨**: MASt3R → COLMAP 형식 변환 (`build_colmap_4mold_sharedfix.py`)
-2. ✅ **해결됨**: points3D.txt 제거 (prior 없음 상태)
-3. 🔧 **진행 중**: GS-2M 코드가 prior 없는 상황을 지원하는지 확인
-   - `prune_init_points`: 기본값 True → False로 수정 (포인트 0개 시 처리)
-   - `_populate_neighbor_cameras`: 다음 단계 확인 필요
+**기술 진행 (모두 GS-2M-v2-algo 디렉토리 내에서만):**
+1. ✅ MASt3R → COLMAP 형식 변환 (`build_colmap_4mold_sharedfix.py`)
+2. ✅ points3D.txt 제거 (prior 없음 상태, 헤더만 남긴 빈 파일)
+3. 🔧 `pbr/light.py` import 경로 수정 (render_utils submodule 인식 안 됨)
+4. 🔧 `prune_init_points` False 처리 (포인트 0개 시 크래시 방지)
+5. 🔧 `_populate_neighbor_cameras` 등 이후 단계에서 포인트 0개 처리 계속 확인 필요
 
 **실험 설계:**
 ```
 Input: MASt3R-SfM res768 포즈 + 빈 point cloud
-Output: real_test_4m_old__mast3r_res768__gs2m_origin__result_nopior
-Comparison: 
-  - Prior 있는 버전 vs Prior 없는 버전
+Repo: ~/Desktop/models/GS-2M-v2-algo (prior-free 전용, 자유 수정)
+Output: real_test_4m_old__mast3r_res768__gs2m_v2algo_nopior
+Comparison:
+  - Prior 있는 버전(GS-2M, 원본 코드) vs Prior 없는 버전(GS-2M-v2-algo, 패치됨)
   - CD, notch CD, void points 정량 비교
   - 육안 품질 (CloudCompare)
 ```
 
-**다음**: GS-2M 코드 수정 계속 진행 (neighbor_cameras 등)
+**다음**: GS-2M-v2-algo에서 render_utils/neighbor_cameras 등 남은 에러 순차 해결
 
 ---
 
