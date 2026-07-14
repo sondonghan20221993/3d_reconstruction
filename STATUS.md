@@ -70,7 +70,44 @@ Comparison:
   - 육안 품질 (CloudCompare)
 ```
 
-**다음**: GS-2M-v2-algo에서 render_utils/neighbor_cameras 등 남은 에러 순차 해결
+**진행 로그 (GS-2M-v2-algo, 순차 해결)**:
+1. ✅ `pbr/light.py`: `render_utils` submodule이 PYTHONPATH에 없어 `ModuleNotFoundError` → GS-2M와 동일하게 `sys.path.insert(...)` 1줄 추가
+2. ✅ `arguments/__init__.py`: `prune_init_points=True`(기본값)가 포인트 0개에서 `torch.max(empty tensor)` 에러 → `False`로 변경 (이 파일은 v2-algo 전용이라 prior 버전에 영향 없음)
+3. ✅ **`scene/dataset_readers.py`의 `readColmapSceneInfo`**: `points3D.txt`가 비어있을 때 fallback이 전혀 없어 `create_from_pcd`의 `distCUDA2` 커널이 0-size 텐서로 "CUDA invalid configuration argument" 발생 (에러 자체는 나중 `torch.stack` 호출에서 비동기적으로 보고됨, 오해하기 쉬움) → **패치**: 코드에 이미 있던 synthetic(Blender) 씬용 랜덤 초기화 로직(100,000 pts, 250~263행)과 동일한 패턴을, COLMAP 씬 로더에도 추가. `nerf_normalization["radius"]`(카메라 배치 기준 씬 크기)를 사용해 씬에 맞는 범위로 랜덤 점 생성. → **결론: GS-2M(3DGS 계열)은 구조적으로 최소한의 point 초기화가 필요함 — 논문의 "prior-independent"는 depth/normal supervision에 pretrained model을 안 쓴다는 의미이지, point cloud initialization 자체를 생략할 수 있다는 뜻이 아님.** 랜덤 초기화 100,000 pts로 대체.
+4. 🔧 **현재 막힌 지점**: `GaussianRasterizationSettings.__new__() got an unexpected keyword argument 'feature_count'`
+   - 원인: 지금 쓰던 `venv-milo`에는 **MILo 전용** `diff_gaussian_rasterization`(구버전, `feature_count` 미지원)이 설치돼 있음. GS-2M은 자체 `submodules/diff-gaussian-rasterization`(feature_count 지원 커스텀 CUDA 렌더러)이 필요.
+   - venv-milo에서 바로 재설치하면 MILo 환경이 깨짐 (환경 분리 원칙 위반) → **GS-2M 전용 새 venv 필요**
+
+### ⓔ venv-gs2m 신규 구축 계획 (2026-07-14, 진행 중)
+
+**배경**: GS-2M 공식 `environment.yml`은 Python 3.9 + torch 2.0.1+cu118을 요구하지만, 서버에는 **CUDA 11.8도 Python 3.9도 없음** (CUDA 12.3만 존재, `venv-*`는 전부 Python 3.10). 이 프로젝트의 기존 venv 전부가 원 논문 스펙 대신 **CUDA 12.3 + torch 2.1.2+cu121**로 적응해서 빌드해온 선례(`pipeline_strategy_3branches.md`)를 그대로 따름.
+
+**빌드 절차 (venv-milo/venv-meshsplat10과 동일 패턴)**:
+```bash
+python3 -m venv ~/Desktop/venvs/venv-gs2m
+source ~/Desktop/venvs/venv-gs2m/bin/activate
+unset LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda-12.3
+export CUDACXX=/usr/local/cuda-12.3/bin/nvcc
+export CPATH=/usr/local/cuda-12.3/include
+
+pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+pip install "numpy<2" plyfile tqdm opencv-python matplotlib scikit-image scikit-learn trimesh \
+    tensorboard einops kornia timm huggingface_hub open3d
+
+cd ~/Desktop/models/GS-2M-v2-algo
+pip install submodules/diff-gaussian-rasterization --no-build-isolation
+pip install submodules/simple-knn --no-build-isolation
+pip install submodules/render-utils --no-build-isolation
+pip install submodules/fused-ssim --no-build-isolation
+pip install submodules/nvdiffrast --no-build-isolation
+```
+- `_lzma.so` 누락 이슈 발생 시 conda `recon3d`에서 복사 (기존 공통 이슈, `pipeline_strategy_3branches.md` 참고)
+- **이 venv는 GS-2M(prior 버전)과 GS-2M-v2-algo(prior-free) 둘 다 공용으로 사용 가능** — MILo 등 다른 프로젝트 venv와 완전히 분리되어 오염 위험 없음
+
+**용도**: 이후 GS-2M 계열 모든 학습(prior 있음/없음 모두)은 `venv-gs2m` 사용 권장. `venv-milo`는 다시 MILo 전용으로 원복(이미 손대지 않음, 현재 상태 그대로 안전).
+
+**다음**: venv-gs2m 빌드 완료 후 prior-free 학습 재시도
 
 ---
 
