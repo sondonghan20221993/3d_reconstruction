@@ -1,8 +1,54 @@
-# 현재 작업 현황 (2026-07-10)
+# 현재 작업 현황 (2026-07-14)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 4m_old 그림자 요철 — **denseicp(ICP정합 dense prior + opacity_reduce) = 온전 메시 중 전 지표 최고(full CD 2.70)**, 육안 검증 대기. 파편화 원인 규명(가우시안 >380만) 완료 (2026-07-11)
+## 현재 상태: **GS-2M 철학 검증 진행 중** — MASt3R 포즈 + prior 없는 원본 학습 시작 (2026-07-14 14:58 KST). Dense ICP 결과 (full CD 2.70) vs 원본 비교 예정
+
+---
+
+## 10. GS-2M 원본 철학 검증: MASt3R 포즈 + Prior 없는 학습 (2026-07-14)
+
+### 배경: GS-2M 논문 확인 후 설계 철학 재정의
+
+**발견:**
+- GS-2M = "Material-aware Gaussian Splatting" (Eurographics 2026, Nguyen et al.)
+- **핵심**: "completely independent of priors from pre-trained models"
+- 의도: Multi-view photometric consistency **만**으로 기하를 학습
+
+**현재까지의 작업 평가:**
+| 방법 | Prior | 특징 | 결과 |
+|---|---|---|---|
+| **raw_baseline** | COLMAP sparse | 기준선 | CD 2.80cm |
+| **dense_icp768** | Dense MVS + ICP | 포인트 최대화 | CD 2.70cm (신기록, 육안 손상) |
+| **원본 (진행중)** | ❌ 없음 | GS-2M 철학 충실 | 대기 중 |
+
+### 실험 설계
+
+**Input:**
+- 카메라 포즈: MASt3R-SfM res768 (retrieval-20-5, shared_intrinsics)
+- 이미지: raw (res 768×1024)
+- **Prior: 없음** (sparse/0/points3D.txt 제거)
+
+**Parameters (GS-2M 원본):**
+```bash
+python3 train.py \
+  -s real_test_4m_old__mast3r_res768__gs2m_origin \
+  -m real_test_4m_old__mast3r_res768__gs2m_origin__result \
+  --iterations 30000 \
+  --port 6038
+  # ❌ 추가 플래그 없음 (opacity_reduce, geometry_init 등 금지)
+```
+
+**목표:**
+1. GS-2M 원본 (prior 없음) vs dense_icp (prior 있음) 메시 품질 비교
+2. Prior의 실제 영향도 정량화
+3. 지표(CD) vs 육안 품질 일치성 재검증
+
+**상태:** 학습 시작 (PID: 2933334, 예상 완료: ~1시간)
+**로그:** `/home/sdh/Desktop/logs/gs2m_mast3r_origin.log`
+**출력:** `/home/sdh/Desktop/data/experiments/real_test_4m_old__mast3r_res768__gs2m_origin__result/`
+
+---
 
 ---
 
