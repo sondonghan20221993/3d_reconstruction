@@ -223,6 +223,21 @@ render.py --extract_mesh --skip_test --voxel_size 0.00381 --sdf_trunc 0.00762   
 3. `prune_init_points`는 prior 없는 조건 자체가 요구하는 최소 수정이므로 유지(0점 방지 목적, 학습 동작상 영향 미미 — outlier 초기점이 애초에 없으므로)
 4. venv-gs2m 환경 유지 (코드 동등성 이미 확인됨)
 
+### ⓚ 통제 재실험 시작 (2026-07-14 23:31)
+
+`real_test_4m_old__mast3r_res768__gs2m_nopior_fixed` 신규 생성, denseicp768과 **cameras.txt/images.txt/이미지 완전 동일**(diff 무출력으로 확인), `points3D.txt`만 빈 헤더로 차이:
+```bash
+python3 train.py \
+  -s .../real_test_4m_old__mast3r_res768__gs2m_nopior_fixed \
+  -m .../real_test_4m_old__mast3r_res768__gs2m_nopior_fixed__result \
+  --iterations 30000 --port 6040 --use_opacity_reduce   # denseicp768과 동일 플래그
+```
+- 랜덤 100k 초기화 정상 진입, loss 6.97→하락 정상 확인
+- 로그: `~/Desktop/logs/gs2m_nopior_fixed.log`
+- 예상 소요: 이전 nopior 런 참고 시 ~2시간 (opacity_reduce로 densification 억제되면 더 짧을 가능성)
+
+**이번엔 진짜 prior 유무만 다른 변수**로 통제됨 — 완료 후 denseicp768과 비교해야 ⓘ의 결론을 다시 낼 수 있음.
+
 ---
 
 ---
