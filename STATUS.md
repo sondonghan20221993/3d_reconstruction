@@ -107,7 +107,31 @@ pip install submodules/nvdiffrast --no-build-isolation
 
 **용도**: 이후 GS-2M 계열 모든 학습(prior 있음/없음 모두)은 `venv-gs2m` 사용 권장. `venv-milo`는 다시 MILo 전용으로 원복(이미 손대지 않음, 현재 상태 그대로 안전).
 
-**다음**: venv-gs2m 빌드 완료 후 prior-free 학습 재시도
+**venv-gs2m 빌드 완료 (2026-07-14 16:44)** — Python 3.10 + torch 2.1.2+cu121 + CUDA 12.3로 5개 submodule 전부 빌드 성공(`diff_gaussian_rasterization`이 `feature_count` 인자 지원하는 GS-2M 전용 버전으로 확인됨).
+
+### ⓕ Prior-free 학습 시작 (2026-07-14 16:44, 진행 중)
+
+```bash
+source ~/Desktop/venvs/venv-gs2m/bin/activate
+unset LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda-12.3
+cd ~/Desktop/models/GS-2M-v2-algo
+python3 train.py \
+  -s ~/Desktop/data/experiments/real_test_4m_old__mast3r_res768__gs2m_origin \
+  -m ~/Desktop/data/experiments/real_test_4m_old__mast3r_res768__gs2m_v2algo_nopior \
+  --iterations 30000 --port 6039
+```
+- Loss 7.04 → 3.13로 정상 감소, 학습 루프 안정적으로 도는 것 확인 (2026-07-14 16:44 기준 260/30000 iter)
+- 로그: `~/Desktop/logs/gs2m_v2algo_nopior.log`
+- 예상 완료: ~17:05 (약 20분 소요 예상, 30k iter 기준)
+
+**비교 예정 (완료 후)**:
+| | 포즈 | Prior | Repo/venv | full CD |
+|---|---|---|---|---|
+| dense_icp768 (기존 최고, 온전 메시) | MASt3R res768 | Dense MVS+ICP | GS-2M / (원래 python3.8 env) | 2.70cm |
+| **v2algo_nopior (신규)** | MASt3R res768 | ❌ 없음 (랜덤 100k init) | GS-2M-v2-algo / venv-gs2m | 측정 예정 |
+
+**다음**: 학습 완료 대기 → 메시 추출(TSDF) → CD/notch CD/void 지표 계산 → CloudCompare 육안 비교
 
 ---
 
