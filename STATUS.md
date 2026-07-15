@@ -338,6 +338,17 @@ python3 train.py \
 
 분석: `analyze_gauss_gt2.py`, `analyze_depth.py` + mesh 높이 분포 인라인 스크립트. 시각자료 2장 바탕화면 다운로드 완료.
 
+### ⓞ 중간 조건 실험 시작 (2026-07-15 19:22) — MASt3R 네이티브 prior (ICP 없음)
+
+3조건 비교의 빈칸 채우기: **dense MVS+ICP prior(denseicp768) / MASt3R 네이티브 prior(신규) / prior 없음(nopior_fixed)**. ICP 정합 없이 MASt3R-SfM이 포즈와 같은 좌표계로 직접 출력한 `pointcloud.ply`를 prior로 사용 — 정합 오차 유입이 없는 "순수한" prior 조건이자, 3DGS 표준 워크플로(포즈와 점이 같은 SfM 런에서 나옴)에 가장 가까운 형태.
+
+- 기존 `gs2m_origin` 디렉토리는 **focal 1451.96 버그 보유 확인** (미검증 sharedfix 산출물) → 폐기하고 신규 구축
+- `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_fixed`: cameras.txt/images.txt/images를 denseicp768과 diff 무출력 확인, points3D.ply = `mast3r_retr_res768/pointcloud.ply` (85MB, 네이티브 그대로)
+- 학습: 원본 GS-2M(보호 디렉토리) + conda gs2m — denseicp768과 동일 파이프라인, `--iterations 30000 --port 6041 --use_opacity_reduce`
+- 초기점 2,221,226개 (setup 프루닝 2,221개), loss 0.93→하락 정상, 로그 `~/Desktop/logs/gs2m_mast3rprior_fixed.log`
+
+이로써 prior "강도"에 따른 스펙트럼 비교 가능: dense 800만점(ICP) vs 네이티브 222만점(정합 無) vs 랜덤 10만점.
+
 ---
 
 ---
