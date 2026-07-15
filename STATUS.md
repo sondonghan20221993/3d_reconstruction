@@ -264,6 +264,43 @@ python3 train.py \
 
 **다운로드**: `/mnt/c/Users/sdh97/Desktop/4m_old_results/1_final/4m_old_nopior768_fixed_{default,D2,raw_fragmented}.ply` (기존 미검증 `4m_old_nopior768_{default,D2,raw_fragmented}.ply`는 교란변수 포함된 버전이므로 참고용으로만 유지, 결론은 `_fixed` 버전 기준).
 
+### ⓜ 실패 메커니즘 정밀 조사 (2026-07-15 18:00) — gaussian 분포·클러스터 구조·densification 궤적 분석
+
+30k 체크포인트 `point_cloud.ply` 직접 분석 (plyfile) + raw mesh 클러스터 분석 (open3d) + 로그 타임라인 추출로 "왜 파편화되는가"를 정량 규명.
+
+**① Densification 궤적 — 두 런은 정반대 방향으로 수렴:**
+
+| iter | denseicp768 (prior) | nopior_fixed (no prior) |
+|---|---|---|
+| 0 | **7,974,199** (dense prior 그대로) | 100,000 (랜덤) |
+| 4,000 | 1,378,909 (프루닝 중) | 1,656,361 (폭증 중) |
+| 6,000 | 1,221,895 | **7,810,576 (피크)** |
+| 16,000~30,000 | **825,731 (고정)** | **5,680,910 (고정)** |
+
+- prior 런은 "정확한 800만 점에서 시작 → 잉여分 프루닝 → 83만"으로 **수렴**
+- no-prior 런은 "랜덤 10만 → iter 2k~6k에 78배 폭증 → 568만"으로 **발산 후 고착**. opacity_reduce가 있어도 못 막음
+
+**② Gaussian 형태 — no-prior는 "점묘화(pointillism)":**
+
+| 지표 | denseicp768 | nopior_fixed |
+|---|---|---|
+| max_scale 중앙값 | 0.0060 | **0.0017 (3.5배 작음)** |
+| max_scale p95 | 0.0344 | 0.0062 |
+| 극소형(<0.001) 비율 | 4.2% | **16.2%** |
+| opacity<0.1 비율 | 12.7% | 28.4% |
+| NaN gaussian | 0개 | **356개** (수치 불안정 흔적) |
+
+→ prior가 있으면 표면 위에서 태어난 gaussian이 **크고 평평하게 자라 표면을 연속적으로 덮음**. prior가 없으면 랜덤 위치에서 photometric loss를 맞추려 **쪼개고 줄이기를 반복 → 수백만 개 미세 반점**으로 씬을 그림. 렌더된 depth가 자글자글해지고 TSDF 표면이 조각남.
+
+**③ Raw mesh 클러스터 구조 — 바닥조차 연결되어 있지 않음:**
+- 총 350,856 클러스터, **최대 클러스터가 전체 삼각형의 3.2%에 불과** (denseicp768은 최대 클러스터 ≈ 씬 전체). 즉 박스만 떨어져 나간 게 아니라 **바닥 평면 자체가 산산조각**
+- 박스 영역 삼각형 32,886개(전체 1.11%)는 수백 개 클러스터에 분산, 가장 큰 박스 조각이 전역 크기순위 **#68** (3,780 tris, 다른 무엇과도 연결 안 됨)
+- **top-N 클러스터 유지로도 구제 불가**: top-100 유지 시 박스 생존 19.6%, top-10,000까지 늘려도 33.6%. `--num_clusters` 조정은 해결책이 아님
+
+**종합 결론**: prior의 역할은 "초기 위치 힌트" 이상 — **gaussian의 크기·형태·연결성을 결정하는 구조적 정규화**. 랜덤 초기화로는 기하 정보 자체는 얻어도(raw box CD 3.19cm) 표면 연결성이 파괴되어 TSDF 기반 mesh 파이프라인 전체가 무력화됨. 개선을 시도한다면 후처리가 아니라 학습 단계(densification threshold 강화, scale 정규화 항 추가, densify 시작 지연 등)를 건드려야 함.
+
+분석 스크립트: 로컬 scratchpad `analyze_gaussians2.py`, `analyze_clusters.py` (서버 /tmp에서 실행).
+
 ---
 
 ---
