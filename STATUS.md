@@ -2,7 +2,7 @@
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: ⚠️ **ⓗ⓲의 "prior 없으면 파편화로 실패" 결론 무효화됨** — 교란변수(focal 1.5배 오류 + opacity_reduce 미사용) 발견, 통제 재실험 준비 중 (2026-07-14 23:30)
+## 현재 상태: ✅ **통제 재실험 완료 — "prior 없으면 파편화로 실패" 결론 재확정** (교란변수 제거 후에도 동일 실패 재현, 2026-07-15 17:30)
 
 ---
 
@@ -237,6 +237,32 @@ python3 train.py \
 - 예상 소요: 이전 nopior 런 참고 시 ~2시간 (opacity_reduce로 densification 억제되면 더 짧을 가능성)
 
 **이번엔 진짜 prior 유무만 다른 변수**로 통제됨 — 완료 후 denseicp768과 비교해야 ⓘ의 결론을 다시 낼 수 있음.
+
+### ⓛ 통제 재실험 완료 + 최종 비교 (2026-07-15 02:00~17:30) — **ⓘ 결론 재확정 (교란변수 제거 후에도 동일 실패 재현)**
+
+**학습 완료**: 30000/30000 iter, 2h27m43s, 최종 PSNR 34.34 (train), 최종 gaussian 수 **5,680,910개**.
+
+**Mesh 추출**: `run_res768_full.sh`와 동일한 명령 (`--extract_mesh --skip_test`, D2는 `--voxel_size 0.00381 --sdf_trunc 0.00762`).
+
+| 항목 | denseicp768 (prior 있음, 기준) | nopior768_fixed (prior 없음, 통제됨) |
+|---|---|---|
+| 최종 gaussian 수 | 1,010,000 | **5,680,910** (5.6배) |
+| raw mesh vertices (클러스터링 전) | 파편화 없음 | default 3,754,769 / D2 2,815,621 |
+| 클러스터 개수 (1-cluster 후처리) | 소수 (파편화 없음) | default **414,173개** / D2 **350,856개** |
+| post-cluster vertices 생존률 | 거의 100% | default 229,887/3,754,769 (6.1%) / D2 56,132/2,815,621 (2.0%) |
+| 전체 CD (eval_mesh_4m_old_v2) | 2.70cm | **평가 불가 — crop 후 0/200,000 (0%)** |
+| box crop CD (10cm margin) | 3.65-3.70cm | **0/200,000 (0%) → CD=nan** |
+| notch CD | 8.00-8.18cm | **gt=24677 pred=0 (부족)** |
+| void points | 177-188 | **pred 부족 0** |
+| raw(클러스터링 전) mesh의 box crop | — | **1,593/200,000 (0.8%), CD=3.19cm, F@3cm=0.172** ← 박스 자체는 존재 |
+| ATE (Umeyama 정렬) | — | 1.81cm (정렬 자체는 정상) |
+
+**해석**:
+- focal 1.5배 오류와 `--use_opacity_reduce` 누락을 모두 수정하고, denseicp768과 **이미지·포즈·focal·학습 플래그가 완전히 동일한 통제된 조건**에서 재실험해도, **동일한 실패 패턴이 그대로 재현됨**: prior 없이 학습하면 gaussian 수가 억제되지 않고(5.68M, opacity_reduce가 있어도), TSDF mesh가 극심하게 파편화되며(35~41만 클러스터), 1-cluster 후처리 시 박스/노치가 있는 얇은 구조물 영역이 통째로 삭제됨.
+- 파편화 이전(raw mesh) 단계에서는 박스 영역이 실제로 존재하고 품질도 나쁘지 않음(CD=3.19cm) — 이는 §ⓘ에서 이미 확인한 것과 동일한 진단으로, "prior 없이는 아예 그 영역을 학습 못한다"가 아니라 **"prior 없이는 노이즈성 gaussian이 과다 생성되어 TSDF 파편화를 유발하고, 그 결과 후처리 단계에서 얇은/작은 구조물이 통째로 잘려나간다"**는 메커니즘.
+- **§ⓘ에서 내렸던 "prior가 필요한 정규화 메커니즘" 결론은, 교란변수(focal 오류·opacity_reduce 누락)를 모두 제거한 뒤에도 유효한 것으로 재확정됨.** GS-2M 논문의 "prior-independent" 주장은 depth/normal supervision에 한정된 것이며, point-cloud 초기화 없이(랜덤 초기화만으로) 학습 시 이 특정 씬(작은 박스/노치가 있는 4m 시뮬레이션 데이터)에서는 densification이 과다해지고 TSDF 파편화로 인한 세부 구조 소실이 실제로 발생함이 통제된 실험으로 확인됨.
+
+**다운로드**: `/mnt/c/Users/sdh97/Desktop/4m_old_results/1_final/4m_old_nopior768_fixed_{default,D2,raw_fragmented}.ply` (기존 미검증 `4m_old_nopior768_{default,D2,raw_fragmented}.ply`는 교란변수 포함된 버전이므로 참고용으로만 유지, 결론은 `_fixed` 버전 기준).
 
 ---
 
