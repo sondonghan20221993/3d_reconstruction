@@ -1,8 +1,16 @@
-# 현재 작업 현황 (2026-07-14)
+# 현재 작업 현황 (2026-07-15)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: ✅ **통제 재실험 완료 — "prior 없으면 파편화로 실패" 결론 재확정** (교란변수 제거 후에도 동일 실패 재현, 2026-07-15 17:30)
+## 현재 상태: 🔄 **3조건(dense+ICP prior / MASt3R 네이티브 prior / prior 없음) 비교 실험 — 중간 조건 학습 진행 중** (2026-07-15 19:36 기준 5,850/30,000 iter, Points=6,177,469)
+
+**지금까지 확정된 결론 (섹션 10 ⓐ~ⓝ)**:
+- GS-2M 논문의 "prior-independent"는 depth/normal supervision에 한정, point-cloud 초기화는 별개
+- 통제된 재실험(focal 버그·opacity_reduce 교란변수 제거)에서도 prior 없이는 실패 재현됨 — denseicp768(CD 2.70cm) vs nopior_fixed(박스/노치 완전 소실)
+- **정밀 진단 결과**: no-prior 실패는 "gaussian 점묘화"가 아니라 **공중 안개(fog) 수렴** — gaussian 99.8%가 GT 표면에서 20cm+ 떨어진 채 지상 1.5~3.5m 상공에 뜬 상태로 photometric loss만 과적합. 대비 뚜렷한 박스만 예외적으로 표면 학습됨(잔디는 반복 텍스처라 기하 모호)
+- **다음 질문(ⓞ, 진행 중)**: dense MVS+ICP처럼 무거운 prior가 아니라, ICP 정합 없는 **MASt3R 네이티브 pointcloud**(SfM과 같은 좌표계, 3DGS 표준 워크플로에 가까움)만으로도 충분한가? → 답 나오면 "최소 요구 prior 수준" 확정 가능
+
+**진행 중인 작업**: `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_fixed__result` 학습 (포트 6041, 원본 GS-2M + conda gs2m, denseicp768과 동일 이미지/포즈/focal/플래그, prior만 MASt3R 네이티브 pointcloud 222만점). 완료 후 mesh 추출(default+D2) → 4개 평가 스크립트 → 3조건 최종 비교표 작성 예정.
 
 ---
 
