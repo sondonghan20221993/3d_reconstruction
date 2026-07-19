@@ -1,16 +1,13 @@
-# 현재 작업 현황 (2026-07-15)
+# 현재 작업 현황 (2026-07-20)
 
 > 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
 
-## 현재 상태: 🔄 **3조건(dense+ICP prior / MASt3R 네이티브 prior / prior 없음) 비교 실험 — 중간 조건 학습 진행 중** (2026-07-15 19:36 기준 5,850/30,000 iter, Points=6,177,469)
+## 현재 상태: ✅ **4조건 prior 비교 실험 완료 — normfix 성공으로 ⓟ 결론 뒤집힘** (2026-07-20)
 
-**지금까지 확정된 결론 (섹션 10 ⓐ~ⓝ)**:
-- GS-2M 논문의 "prior-independent"는 depth/normal supervision에 한정, point-cloud 초기화는 별개
-- 통제된 재실험(focal 버그·opacity_reduce 교란변수 제거)에서도 prior 없이는 실패 재현됨 — denseicp768(CD 2.70cm) vs nopior_fixed(박스/노치 완전 소실)
-- **정밀 진단 결과**: no-prior 실패는 "gaussian 점묘화"가 아니라 **공중 안개(fog) 수렴** — gaussian 99.8%가 GT 표면에서 20cm+ 떨어진 채 지상 1.5~3.5m 상공에 뜬 상태로 photometric loss만 과적합. 대비 뚜렷한 박스만 예외적으로 표면 학습됨(잔디는 반복 텍스처라 기하 모호)
-- **다음 질문(ⓞ, 진행 중)**: dense MVS+ICP처럼 무거운 prior가 아니라, ICP 정합 없는 **MASt3R 네이티브 pointcloud**(SfM과 같은 좌표계, 3DGS 표준 워크플로에 가까움)만으로도 충분한가? → 답 나오면 "최소 요구 prior 수준" 확정 가능
-
-**진행 중인 작업**: `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_fixed__result` 학습 (포트 6041, 원본 GS-2M + conda gs2m, denseicp768과 동일 이미지/포즈/focal/플래그, prior만 MASt3R 네이티브 pointcloud 222만점). 완료 후 mesh 추출(default+D2) → 4개 평가 스크립트 → 3조건 최종 비교표 작성 예정.
+**최종 결론 (섹션 10 ⓐ~ⓢ)**:
+- GS-2M 논문의 "prior-independent"는 depth/normal supervision에 한정, point-cloud 초기화는 별개 — 랜덤 초기화(nopior_fixed)는 여전히 실패(공중 안개 수렴 → TSDF 파편화 → 박스/노치 소실)
+- mast3rprior_fixed(네이티브 prior)의 실패는 prior 품질 문제가 아니라 **fetchPly 색 로딩 버그**였음: native ply에 nx,ny,nz가 없으면 멀쩡한 RGB까지 버리고 ≈검정으로 초기화 → densification 폭증(568만)
+- **⭐ 최종 답 (ⓢ)**: normal 필드만 추가해 색이 정상 로드되게 한 **normfix가 성공** — gaussian 101만 수렴, 전체 CD 3.34cm(denseicp768 2.70cm과 근접), notch CD 6.60cm(오히려 denseicp 8.0cm보다 좋음). **dense MVS+ICP는 불필요, MASt3R native SfM 점군이면 충분**. "prior의 핵심은 정합 품질"이라는 ⓟ 해석은 철회.
 
 ---
 
@@ -356,6 +353,97 @@ python3 train.py \
 - 초기점 2,221,226개 (setup 프루닝 2,221개), loss 0.93→하락 정상, 로그 `~/Desktop/logs/gs2m_mast3rprior_fixed.log`
 
 이로써 prior "강도"에 따른 스펙트럼 비교 가능: dense 800만점(ICP) vs 네이티브 222만점(정합 無) vs 랜덤 10만점.
+
+### ⓟ 중간 조건 완료 + 3조건 최종 비교 (2026-07-16 00:37~14:52) ⭐ 결론
+
+**학습 완료**: 30,000/30,000 iter, 총 소요 **5시간 15분** (19:22:13→00:36:58), 최종 PSNR 35.23, L1 0.0116, 최종 gaussian **5,687,205개**.
+
+**메시 추출**: default/D2 동시 실행 시 같은 파일명(`tsdf_mesh.ply`/`tsdf_post.ply`)으로 서로 덮어쓰는 사고 발생 → D2 결과를 `*_D2.ply`로 백업 후 default 재추출로 복구.
+
+**3조건 최종 비교표** (동일 이미지·포즈·focal·`--use_opacity_reduce`, prior만 다름):
+
+| 지표 | **denseicp768**<br>(Dense MVS+ICP, 800만→83만) | **mast3rprior_fixed**<br>(MASt3R 네이티브, 222만, ICP 無) | **nopior_fixed**<br>(prior 없음, 랜덤 10만) |
+|---|---|---|---|
+| 최종 gaussian 수 | 1,010,000 | **5,687,205** | 5,680,910 |
+| raw mesh 클러스터 수 (default/D2) | 소수 (파편화 없음) | **432,199 / 370,462** | 414,173 / 350,856 |
+| 최대 클러스터 비율 | ≈전체 | **3.3% / 2.1%** | ≈3% (동급) |
+| raw mesh box crop CD | 3.65~3.70cm | **3.69cm / 2.88cm** | 3.19cm |
+| post-cluster box crop | 0.8~7.4% 생존 | **0/200,000 (0%)** | 0/200,000 (0%) |
+| 전체 CD (post-cluster) | 2.70~2.77cm | **평가 불가 (0%)** | 평가 불가 (0%) |
+| notch CD | 8.00~8.18cm | **gt=24677 pred=0** | gt=24677 pred=0 |
+
+**핵심 발견 — MASt3R 네이티브 prior(ICP 없음)는 "prior 없음"과 사실상 동일하게 실패함:**
+
+1. gaussian 수(568만 vs 568만), 클러스터 파편화(43만 vs 41만), post-cluster 생존율(0% vs 0%) 모두 nopior_fixed와 **거의 동일한 수치**. denseicp768(83만 gaussian, 파편화 없음)과는 완전히 다른 양상.
+2. 초기점 222만 개(랜덤 10만보다 22배 많음)를 줬음에도 densification이 억제되지 않고 568만까지 폭증 — **prior의 "점 개수"가 아니라 "dense MVS+ICP로 표면에 정합된 정도"가 densification 억제의 핵심 변수**임을 시사.
+3. raw mesh 단계에서는 박스가 존재(CD 2.88~3.69cm, denseicp768과 대등하거나 더 나음)하지만 1-cluster 후처리에서 소실 — ⓘ~ⓝ에서 규명한 "안개 수렴 → TSDF 파편화 → 후처리 시 구조물 탈락" 메커니즘이 그대로 재현됨.
+
+**"최소 요구 prior 수준" 결론**: 이 데이터셋(4m 시뮬레이션, sparse-view, 저텍스처 잔디)에서는 **SfM이 자연스럽게 뱉는 sparse pointcloud만으로는 부족**하며, **dense MVS 재구성 + ICP 정합까지 거친 강한 prior가 사실상 필수**임이 확인됨. "가벼운 prior면 충분하지 않을까"라는 가설(ⓞ의 동기)은 기각됨 — prior 스펙트럼은 이분법(있음/없음)이 아니라 "정합 품질" 축으로 봐야 하며, 이 씬에서는 그 축의 상당히 강한 지점(dense+ICP)까지 가야 실패를 면함.
+
+**GS-2M 논문 "prior-independent" 주장에 대한 최종 정리**: 논문의 주장은 depth/normal supervision에 pretrained model을 쓰지 않는다는 의미로 참이나, point-cloud initialization 관점에서는 (a) 최소한의 점 초기화가 구조적으로 필요하고(ⓒ), (b) 이 프로젝트의 sparse-view/저텍스처 드론 데이터셋에서는 **단순 SfM 점이 아니라 dense+ICP 수준의 정합된 prior가 densification 정규화·기하 모호성 해소에 사실상 필수**임이 3조건 통제 실험으로 확정됨.
+
+**산출물**: 서버 `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_fixed__result/train/ours_30000/mesh/{tsdf_mesh,tsdf_post}_default.ply`, `{tsdf_mesh,tsdf_post}_D2.ply`
+
+### ⓠ Prior 자체 품질 정량 비교 (2026-07-16 17:00) — "native가 더 깔끔해 보인다"는 관찰 검증 → **사실로 확인, ⓟ 해석 수정 필요**
+
+CloudCompare 육안 비교에서 native prior가 dense+ICP보다 오히려 깔끔해 보인다는 관찰이 나와, 두 prior의 GT 표면 밀착도를 직접 측정 (`analyze_prior_quality.py`, Umeyama 정렬 후 지면 z=0·박스 GT 대비):
+
+| 지표 | dense+ICP (797만점) | MASt3R native (222만점) |
+|---|---|---|
+| 지면 \|z\| 중앙값 | 2.20cm | **0.95cm (2.3배 정확)** |
+| 지면 \|z\| p90 | **3.84cm** | 11.80cm |
+| 지면 <10cm 비율 | **100.0%** | 89.1% |
+| 지면 **>20cm floater** | **0.0%** | **7.2% (≈16만점)** |
+| 박스영역 CD / recall@3cm | 6.27cm / 24.8% | **4.56cm / 55.5%** |
+
+**→ "native가 부정확해서 실패했다"는 ⓟ의 단순 해석은 틀림.** native는 중앙값 기준으로 오히려 2배 이상 정확함. 진짜 차이는:
+1. **오차 분포의 꼬리**: dense+ICP는 SOR 필터링·fusion 제약 덕에 오차가 10cm에서 **하드 바운드**(>20cm 0%). native는 중앙값은 좋지만 **heavy-tail** — 16만 개 점이 표면에서 20cm+ 이탈(안개 수렴의 씨앗 후보)
+2. **밀도/커버리지**: 797만 vs 222만 (3.6배)
+3. **⚠️ 추가 교란 발견**: mast3rprior 학습 로그에 `Load Ply colors and normals failed, random init...` — native ply는 색/법선 로드 실패로 랜덤 초기화됨 (denseicp768 로그엔 이 메시지 없음). GS-2M(PGSR 계열)의 평면 정규화에 초기 normal이 영향을 줄 수 있음
+
+**3가지 후보(꼬리 outlier / 밀도 / normal 초기화) 중 무엇이 결정적인지는 미분리.** 분리 실험 옵션: (a) native prior에서 >20cm outlier만 SOR 제거 후 재학습, (b) dense prior를 222만으로 다운샘플 후 재학습, (c) native ply에 색/법선 필드 추가 후 재학습.
+
+### ⓡ 교란 원인 확정 + 분리 실험 1차: normfix (2026-07-16 17:00 시작)
+
+**"Load Ply failed"의 원인 확정** (`scene/dataset_readers.py:110` `fetchPly`):
+- native ply(MASt3R 출력)는 `x,y,z,red,green,blue`만 있고 **`nx,ny,nz`가 없음** (dense+ICP ply는 Open3D가 normal 포함해 저장)
+- `fetchPly`는 색과 normal을 **한 try 블록**에서 읽음 → normal KeyError 시 **멀쩡한 RGB까지 통째로 버리고** `np.random.rand/255`(≈검정)로 대체
+- **normal 자체는 무해로 판정**: `create_from_pcd`(gaussian_model.py:181-190)는 `pcd.normals`를 아예 사용하지 않음 (GS-2M의 normal은 gaussian 회전축에서 실시간 유도) — ⓠ-3의 "normal이 평면 정규화에 영향" 추정은 철회
+- **실제 교란은 색**: mast3rprior_fixed 런은 222만 점 전부 검정으로 시작 → 초기 photometric error 과대 → densification 폭증기에 잘못된 gradient 증폭 가능성
+
+**분리 실험 (a′) normfix**: native ply에 `nx,ny,nz=0` 필드만 추가(GS-2M `storePly` 관례와 동일)한 `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_normfix` 생성 — cameras.txt diff 무출력 확인, fetchPly 색 로드 검증(mean RGB 0.66/0.69/0.46 = 잔디색). 점 좌표는 mast3rprior_fixed와 완전 동일하므로 **"색 초기화"만 분리한 실험**.
+- 학습 시작 17:00, 포트 6042, 동일 플래그, 로그 `~/Desktop/logs/gs2m_mast3rprior_normfix.log`
+- **조기 신호**: 초기 Loss 0.35 (검정 초기화였던 mast3rprior_fixed는 0.93) — 색 로드 효과 즉시 확인됨
+- **중간 경과 (iter 12,800, 43%)**: Points **792,439로 수렴 중** — mast3rprior_fixed의 568만 폭증과 정반대, denseicp768의 수렴값(825,731)과 거의 동일한 궤적. "색 초기화가 범인" 가설 쪽으로 강하게 기움
+- 판정 기준: 이 런이 성공(파편화 없음)하면 "색 초기화가 범인", 실패하면 "floater 꼬리(7.2%, 16만점)가 범인" → 후속 (b′) outlier 제거 실험으로
+
+### ⓢ normfix 결과 (2026-07-19 완료) — **성공. "색 초기화 버그가 범인" 확정, ⓟ 결론 뒤집힘**
+
+**학습**: 30,000 iter 완료, 최종 PSNR **34.07** / L1 0.0146. Points 궤적 222만 → 79만 → **101만 수렴** (mast3rprior_fixed의 568만 폭증과 정반대, denseicp768과 동일한 가지치기 패턴).
+
+**메시 추출**: default(자동 파라미터) → D2(voxel 0.00381/sdf_trunc 0.00762) 순차 실행. raw 클러스터 **95,608 / 100,689개** — 실패 케이스(35만~43만)의 1/4 수준이고, 1-cluster 후처리에서 **215만 vertex 본체가 생존** (실패 케이스는 박스 0% 소실).
+
+**4조건 최종 비교** (동일 이미지·포즈·focal·플래그, points3D.ply만 다름):
+
+| 지표 | denseicp768<br>(dense MVS+ICP) | mast3rprior_fixed<br>(native, 색버그) | **mast3rprior_normfix**<br>(native, 색 로드 OK) | nopior_fixed<br>(랜덤) |
+|---|---|---|---|---|
+| 최종 gaussian 수 | 1,010,000 | 5,687,205 | **1,016,549** | 5,680,910 |
+| raw 클러스터 (default/D2) | 소수 | 43만/37만 | **9.6만/10.1만** | 41만/35만 |
+| post-cluster box 생존 | 0.8~7.4% | 0% | **6.3~8.0%** | 0% |
+| 전체 CD (post) | 2.70~2.77cm | 평가불가 | **3.34 / 3.38cm** | 평가불가 |
+| F@10cm | — | — | 0.879 / 0.875 | — |
+| notch CD | 8.00~8.18cm | pred=0 | **6.60 / 6.78cm (더 좋음)** | pred=0 |
+| boxcrop CD (margin 10cm) | — | — | 3.58 / 3.62cm | — |
+
+(주의: notch precision 스크립트는 pred 232~254점으로 표본 부족 → inf/nan, 판정 제외)
+
+**결론 — ⓟ의 "dense+ICP prior 사실상 필수" 결론 철회**:
+1. mast3rprior_fixed의 실패 원인은 prior 품질이 아니라 **fetchPly 색 로딩 버그**(nx,ny,nz 부재 → RGB까지 폐기 → 222만 점 전부 ≈검정 초기화)였음. 점 좌표가 완전히 동일한 normfix가 성공함으로써 분리 증명 완료.
+2. **MASt3R native SfM 점군(ICP 없음)만으로도 GS-2M은 성공** — 전체 CD 3.34cm(denseicp768 2.70cm 대비 +0.6cm), notch CD는 오히려 6.60cm로 더 좋음(8.0cm 대비). native prior의 7.2% floater 꼬리(16만점)는 opacity_reduce 가지치기가 흡수 가능한 수준.
+3. GS-2M "prior-independent" 검증의 최종 답: **dense MVS+ICP는 불필요. SfM이 자연스럽게 출력하는 점군이면 충분**(단, ply에 normal 필드가 있어야 색이 로드되는 fetchPly 구현 특성 주의). 랜덤 초기화(nopior)만은 여전히 실패.
+4. 후속 (b′) floater 제거 실험은 불필요해짐 (범인 확정).
+
+**산출물**: 서버 `real_test_4m_old__mast3r_res768__gs2m_mast3rprior_normfix__result/train/ours_30000/mesh/{tsdf_mesh,tsdf_post}_{default,D2}.ply`
 
 ---
 
