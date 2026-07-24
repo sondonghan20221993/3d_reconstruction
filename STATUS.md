@@ -2134,6 +2134,23 @@ MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그
 
 `D:\UE_5.4\Engine\Binaries\Win64\settings.json`이 실제 활성 파일(우선순위: 커맨드라인 > 실행파일 폴더 > 실행 폴더 > `Documents\AirSim\`, `Documents` 경로는 최하위라 무시되기 쉬움 — 주의). `settings_baseline.json`(외란 없음) / `settings_disturbed.json`(바람+GPS 오차) 두 프리셋을 파일로 복사해 스왑하는 방식 사용. 전환 후 UE5 Play를 재시작해야 반영됨(런타임 중 설정 재로드 안 됨).
 
+## normfix 결론 정정 + 핵심 요지 (2026-07-24)
+
+### 정정: "dense MVS+ICP 불필요" 결론은 과장이었음
+| | 전체 CD | notch CD |
+|---|---|---|
+| denseicp768 (dense MVS+ICP) | **2.70cm** ✅ 더 좋음 | 8.0cm |
+| normfix (native, 색로딩 버그 수정) | 3.29~3.34cm | **6.15~6.60cm** ✅ 더 좋음 |
+| normfix + voxelcoarse (TSDF 파라미터 튜닝) | 3.29cm | 6.15cm |
+
+normfix가 실제로 확인한 건 "native prior가 (색 로딩 버그만 고치면) 더 이상 완전히 실패(5.68M 가우시안 폭증·파편화)하지는 않는다"는 것뿐. **전체 표면 정확도는 dense MVS+ICP가 여전히 확실히 우위**(약 20% 더 좋음). normfix가 이긴 건 notch 영역 하나뿐이고 차이도 크지 않음. "dense+ICP 불필요, native로 충분" 식의 결론은 과장이었고 정확히는 "쓸 수는 있지만 dense보다 낫지 않은 대안"으로 정정.
+
+### 핵심 요지: 남은 오차의 가장 큰 두 요인
+1. **표면 반사가 심한 부분의 잘못된 렌더링** — 반사면에서 photometric loss가 실제 표면과 다른 곳을 학습하게 유도해 기하 왜곡 발생
+2. **요철(notch) 부분의 렌더링 부정확** — 저텍스처·그림자 영역이라 MASt3R 매칭과 GS densification 둘 다 취약 (notch CD가 전체 CD보다 항상 2배 가까이 나쁨 — 6~8cm vs 2.7~3.3cm)
+
+이 두 가지가 지금까지의 모든 실험(prior 종류, 전처리, TSDF 파라미터)에서 공통적으로 성능을 깎아먹는 최대 병목. 앞으로의 실험 우선순위도 이 두 요인 직접 타겟팅 여부로 판단할 것.
+
 ## GS-2M 다음 실험 계획 (2026-07-20 작성, 착수 대기 중)
 
 전제: 서버(sdh@210.110.250.34:8522) GPU가 타 사용자(cbchoi, `river_data` 스크립트)로 90%+ 점유 중이라 착수 보류. 모두 원본 GS-2M(`~/Desktop/models/GS-2M`) 코드는 건드리지 않고 데이터/인자만 바꿔서 실행(공정 비교 원칙 유지).
