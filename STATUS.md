@@ -1,17 +1,920 @@
-# 현재 작업 현황 (2026-07-20)
+# 3d_reconstruction 작업 현황
 
-> 새 세션에서 이 파일만 읽으면 지금 뭘 하고 있는지 파악 가능.
+이 문서는 실험 로그이자 재현 매뉴얼. 시간순 나열 대신 **PART(트랙)** 별로 묶어서 정리(2026-07-24 재구성). 각 PART 내부는 시간순.
 
-## 현재 상태: ✅ **4조건 prior 비교 실험 완료 — normfix 성공으로 ⓟ 결론 뒤집힘** (2026-07-20)
+## 현재 상태 요약 (2026-07-24 기준)
 
-**최종 결론 (섹션 10 ⓐ~ⓢ)**:
-- GS-2M 논문의 "prior-independent"는 depth/normal supervision에 한정, point-cloud 초기화는 별개 — 랜덤 초기화(nopior_fixed)는 여전히 실패(공중 안개 수렴 → TSDF 파편화 → 박스/노치 소실)
-- mast3rprior_fixed(네이티브 prior)의 실패는 prior 품질 문제가 아니라 **fetchPly 색 로딩 버그**였음: native ply에 nx,ny,nz가 없으면 멀쩡한 RGB까지 버리고 ≈검정으로 초기화 → densification 폭증(568만)
-- **⭐ 최종 답 (ⓢ)**: normal 필드만 추가해 색이 정상 로드되게 한 **normfix가 성공** — gaussian 101만 수렴, 전체 CD 3.34cm(denseicp768 2.70cm과 근접), notch CD 6.60cm(오히려 denseicp 8.0cm보다 좋음). **dense MVS+ICP는 불필요, MASt3R native SfM 점군이면 충분**. "prior의 핵심은 정합 품질"이라는 ⓟ 해석은 철회.
+**메인 트랙**: `real_test_4m_old` (17장 시뮬레이션, GT 있음) 기준 GS-2M prior/전처리 비교.
+
+- **최고 결과**: normfix + voxelcoarse(TSDF 파라미터 튜닝) — 전체 CD 3.29cm, F@10cm 0.8827, notch CD 6.15cm
+- **정정된 결론**: dense MVS+ICP(denseicp768, CD 2.70cm)가 전체 표면 정확도에서 여전히 최선. native prior(normfix)는 색 로딩 버그만 고치면 더 이상 완전히 실패하지 않지만, dense+ICP보다 낫진 않음 — notch 영역만 근소 우위. ("dense+ICP 불필요"는 과장된 결론이었음, 상세는 PART A 하단)
+- **사용자가 시각 확인한 핵심 병목 두 가지**: ① 표면 반사가 심한 부분의 잘못된 렌더링, ② 요철(notch) 부분의 렌더링 — 수치로 원인을 재해석하지 말 것
+- **진행 중**: 서버 GPU가 타 사용자(cbchoi) 점유로 학습 필요 실험(native+SOR, clahe+native 조합) 대기 큐(`~/Desktop/queue_task1_task3.sh`)에 등록, GPU 한가해지면 자동 시작
+- **완료**: TSDF 파라미터 스윕(voxelcoarse 승, PART A 최하단), clahe 파라미터 스윕 + retinex prior 정량 비교(둘 다 native 원본보다 prior 자체 정확도는 낮음 — PART A 최하단)
+
+**결과 파일**: 서버 실험 디렉토리는 `sysai3:~/Desktop/data/experiments/real_test_4m_old__*`. 로컬 다운로드본은 `C:\Users\sdh97\Desktop\4m_old_results\1_final\`(메시), `\5_prior_점구름\`(prior 점군).
+
+**보조 트랙**: 실제 드론 데이터(PART B), 초기 시뮬레이션 real_test/blue_1(PART C, 아카이브).
 
 ---
 
-## 10. GS-2M 원본 철학 검증 (2026-07-14) — Prior 있는 버전 vs Prior 없는 버전 비교
+# PART A. GS-2M 4m 시뮬레이션 (메인 트랙, 최신)
+
+## GS-2M 다음 실험 계획 (2026-07-20 작성, 착수 대기 중)
+
+전제: 서버(sdh@210.110.250.34:8522) GPU가 타 사용자(cbchoi, `river_data` 스크립트)로 90%+ 점유 중이라 착수 보류. 모두 원본 GS-2M(`~/Desktop/models/GS-2M`) 코드는 건드리지 않고 데이터/인자만 바꿔서 실행(공정 비교 원칙 유지).
+
+### 우선순위 순서
+
+1. **native prior + SOR 필터 재학습** [최우선] — 🔄 서버 큐 대기 중(GPU 확보되면 자동 시작)
+   - native prior(`mast3r_retr_res768/pointcloud.ply`)에서 GT 표면 20cm+ 벗어난 floater(7.2%, ~16만점) SOR 필터로 제거
+   - 필터링 스크립트 작성 → 새 experiments 디렉토리 생성(cameras/images는 normfix와 동일, points3D.ply만 필터링본으로 교체)
+   - 학습: 동일 플래그(`--iterations 30000 --use_opacity_reduce`), 새 포트
+   - 목적: denseicp768(CD 2.70cm)을 넘을 수 있는지 확인 — native의 정확한 중앙값 + 깨끗한 꼬리 조합
+   - 예상 소요: 필터링 10분 + 학습 4~5시간 + 추출/평가 20분
+
+2. **TSDF 후처리 파라미터 튜닝** [가장 쌈, 학습 불필요] — ✅ 완료. voxelcoarse(voxel_size=0.008)가 신규 최고 기록(CD 3.29cm, notch 6.15cm)
+   - 기존 normfix 학습 결과(`point_cloud/iteration_30000`) 재사용
+   - `render.py --extract_mesh` 재실행하되 num_clusters, voxel_size 등 파라미터 변형 3~5종
+   - 목적: post-cluster 시 raw의 9.6만 클러스터 중 본체 외 잡음을 더 깔끔히 제거 가능한지
+   - 예상 소요: 30~60분(추출만, 학습 없음)
+
+3. **clahe 전처리 + native prior 조합** — 🔄 서버 큐 대기 중(1번 뒤이어 자동 실행 예정). 단, 5번 결과상 clahe가 prior 정확도 자체는 native보다 낮아 재고 필요
+   - 기존 clahe 검증(요철 형상 최고)과 native prior 승자를 조합
+   - clahe 이미지로 MASt3R 재실행(SfM) → normal 필드 추가한 prior ply 생성 → GS-2M 학습
+   - 예상 소요: SfM 30분~1시간 + 학습 4~5시간 + 추출/평가 20분
+
+4. **res1024 + native prior 재평가**
+   - 기존 res1024 기각은 denseicp 파이프라인 기준이었음 — native prior 주인공인 지금 재검토 가치
+   - MASt3R res1024로 재실행 → GS-2M 학습
+   - 예상 소요: SfM 30분~1시간 + 학습 4~6시간 + 추출/평가 20분
+
+5. **clahe 파라미터 스윕** [전처리 추가 실험, 학습 불필요 1차 검증] — ✅ 완료. c35g8/c20g16 모두 원본 clahe·native보다 prior 자체 CD 열위(4.5~5.1cm vs native 3.83cm) — 채택 보류
+   - 현재 clahe는 clipLimit 2.0 / 8×8 타일 한 세트만 검증됨
+   - clipLimit 3~4, 타일 16×16 등 2~3종 변형으로 이미지 재생성 → MASt3R SfM만 돌려 prior 육안/정량 비교
+   - 승자만 3번(clahe+native 학습)에 반영
+   - 예상 소요: 변형당 SfM 30분~1시간(학습 없음)
+
+6. **Retinex(MSRCR/SSR) 전처리 시험** [전처리 추가 실험] — ✅ 완료. prior CD 4.00cm, native(3.83cm)보다 열위 — 채택 보류
+   - 조명/반사 성분 분리로 그늘 영역을 들어올림 — 전역 조명 불균형에 CLAHE보다 강할 수 있음
+   - OpenCV+numpy로 전처리 스크립트 작성 → MASt3R SfM → prior 비교(1차는 학습 없이 판별)
+   - 유망하면 GS-2M 학습까지 진행
+   - 예상 소요: 스크립트 30분 + SfM 30분~1시간
+
+(보류 후보, 5·6번 결과 보고 결정: clahe+bilateral/NLM denoise 조합, shadow-region 국소 보정, 약한 unsharp mask)
+
+### 전체 예상 시간(순차, GPU 단독 기준)
+- 1~4번: 약 20~25시간(학습만 16~24시간 차지)
+- 5~6번: 1차 검증(SfM만)은 각 1시간 내외 추가
+
+### 착수 조건
+서버 GPU 점유 상황 재확인 후 시작. 확인 명령: `nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv` / `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv`
+
+## normfix 결론 정정 + 핵심 요지 (2026-07-24)
+
+### 정정: "dense MVS+ICP 불필요" 결론은 과장이었음
+| | 전체 CD | notch CD |
+|---|---|---|
+| denseicp768 (dense MVS+ICP) | **2.70cm** ✅ 더 좋음 | 8.0cm |
+| normfix (native, 색로딩 버그 수정) | 3.29~3.34cm | **6.15~6.60cm** ✅ 더 좋음 |
+| normfix + voxelcoarse (TSDF 파라미터 튜닝) | 3.29cm | 6.15cm |
+
+normfix가 실제로 확인한 건 "native prior가 (색 로딩 버그만 고치면) 더 이상 완전히 실패(5.68M 가우시안 폭증·파편화)하지는 않는다"는 것뿐. **전체 표면 정확도는 dense MVS+ICP가 여전히 확실히 우위**(약 20% 더 좋음). normfix가 이긴 건 notch 영역 하나뿐이고 차이도 크지 않음. "dense+ICP 불필요, native로 충분" 식의 결론은 과장이었고 정확히는 "쓸 수는 있지만 dense보다 낫지 않은 대안"으로 정정.
+
+### 핵심 요지 (사용자 지정, 시각 확인 기반 — 수치로는 원인 재해석하지 말 것)
+사용자가 실제 렌더링/메시를 시각적으로 확인한 결과, 남은 오차의 가장 큰 두 요인은:
+1. **표면 반사가 심한 부분의 잘못된 렌더링**
+2. **요철(notch) 부분의 렌더링**
+
+수치 참고(해석 없이 사실만): notch CD는 모든 실험에서 전체 CD보다 항상 나쁨(6~8cm대 vs 2.7~3.3cm대). 반사 관련 정량 지표는 아직 별도로 측정한 바 없음.
+
+앞으로의 실험은 이 두 요인을 사용자가 시각적으로 확인해 우선순위를 판단.
+
+
+## 최종 시뮬레이션 환경 검증 실험 계획 (2026-06-28)
+
+> **위치 부여**: 이 실험은 **시뮬레이션(AirSim/Unreal) 환경에서의 마지막 검증**이다.
+> 여기서 MASt3R-SfM 기반 pose-free 파이프라인(포즈 추정 → ply 초기화 → 3D 복원)이
+> 시뮬레이션 GT 대비 정량적으로 검증되면, 이후 실제 드론 데이터로 넘어간다.
+> 실제 드론에는 GT가 없으므로, **GT로 정량 검증이 가능한 것은 이 시뮬레이션 단계가 마지막**이다.
+
+### 0. 데이터셋 / 환경
+
+| 항목 | 값 |
+|---|---|
+| **데이터셋** | `real_test_3m_uniform`(17장) + `real_test_7m_uniform`(17장) = **34장** ← **최종 확정** |
+| Google Drive | `1-RAGc9v-JDg6tcDdHrCDLmn3zTxm0smA` (`real_test_3-7m_uniform.zip`, 135MB) |
+| 서버 경로 | `/home/sdh/Desktop/data/datasets/real_test_3m_uniform/`, `real_test_7m_uniform/` |
+| 해상도 | 1920×1080 |
+| 출처 | AirSim/Unreal 시뮬레이션 (orbit, **균일 촬영**) |
+| 서버 | sysai3, RTX A6000 48GB |
+| 포즈 | ✅ MASt3R-SfM 완료 → `real_test_combined_uniform__mast3r/poses.npy` (34,4,4) |
+| 초기 점군 | ✅ `pointcloud.ply` 1,804,901 pts → 500k 다운샘플 → COLMAP points3D.txt |
+
+> ⚠️ **데이터셋 교체 사유 (2026-06-28)**: 이전 `real_test_3m/7m`은 웨이포인트 기반 비행으로
+> 각도 간격 std=9.4° (14°~43°), 타임스탬프 간격 3.8~7.9s로 **비균일 촬영**이었음.
+> 신규 데이터셋은 각도 간격 std=1.5~2.5° (18°~31°)로 **거의 균일**하게 개선.
+> 이전 실험 결과 전체 폐기, 신규 데이터로 처음부터 재시작.
+
+### 포즈 품질 (per-group Umeyama Sim(3) 정렬, 2026-06-28 측정)
+
+| 항목 | 3m (17장) | 7m (17장) | 전체 |
+|---|---|---|---|
+| ATE RMSE | **0.76 cm** | **27.6 cm** | 19.52 cm |
+| RPE 회전 | 0.23° | 0.67° | — |
+| focal (1920px 기준) | 969.40 px | 969.40 px | (shared_intrinsics) |
+
+> ⚠️ 7m ATE 27.6cm는 swin-5 그래프 경계효과: 3m↔7m 간 cross-altitude 연결로
+> 7m frame 0 (103cm 이상치) 발생. 7m 단독 실행 시 ATE=2.03cm였으나 합산 후 악화.
+> 근본 원인: 고도 차이로 feature matching 불충분 → inter-orbit scale mismatch ~11.6%.
+> **3m+7m 합산 복원 유지 이유**: 지형 커버리지 확보 목적.
+
+### 1. 대원칙: GT는 평가에만, 학습엔 절대 안 씀
+
+| 단계 | GT 사용? |
+|---|---|
+| 포즈 추정 / ply 초기화 / 모델 학습 / 메시 추출 | ❌ **GT 0% (100% MASt3R 추정값)** |
+| 메시 정렬 + CD/F-score 평가 | ✅ GT 메시를 **정답지로만** (DTU/TNT 표준 관행과 동일) |
+| 메시 정렬용 Sim(3) | ✅ GT 카메라 포즈를 **평가 시점 정렬에만** (학습 leakage 아님) |
+
+> GT를 학습에 넣으면 leakage(부정행위)지만, 평가 정답지로 쓰는 것은 모든 surface
+> reconstruction 논문(DTU Chamfer, TNT F-score)의 표준이다.
+
+### 2. prior 정의 (혼동 방지 — 명확히 분리)
+
+prior는 두 가지가 있으며 **서로 다른 것**이다:
+
+| prior | 정체 | 역할 |
+|---|---|---|
+| **① ply 초기화** | MASt3R-SfM `pointcloud.ply` (1.8M점, 500k 다운샘플 후 COLMAP 투입) | 가우시안 시작 위치 (input). **모든 모델 공통** |
+| **② depth supervision** | MASt3R 렌더 depth → invdepth L1 loss (`--depths`) | 학습 중 외부 깊이 정규화 |
+
+- **"외부 depth"**(②)와 **"모델 내부가 자체 렌더링하는 depth"**(2DGS depth-distortion, TSDF fusion용 depth 등)는 다름. 후자는 알고리즘 본질이라 끌 수 없고 당연히 씀.
+- 우리가 통제하는 변수는 ②(외부 MASt3R depth supervision)뿐.
+
+### 3. 실험 트랙 (2개)
+
+### 트랙 ① 메시 복원 (CD/F-score) — surface method 비교
+
+| 설정 | 값 |
+|---|---|
+| 학습 | `eval=False`, **34장 전체** (held-out 없음 — 복원은 전량 투입이 정석) |
+| 통일 prior | **① ply 초기화만** (외부 depth supervision ② 없음 → 공정) |
+| 정규화 | 각 모델 **native 방식** (끌 수 없는 본연의 것) |
+| 평가 | 추출 메시 vs **언리얼 export GT 메시**, CD↓ / F-score↑ |
+
+| 모델 | 메시 추출 방식 | ply-init | 외부 depth |
+|---|---|---|---|
+| **3DGS + TSDF** | 별도 후처리 (open3d TSDF) | ✅ | ❌ |
+| **2DGS** | native (surfel→TSDF) | ✅ | ❌ |
+| **GS-2M** | native (TSDF) | ✅ | ❌ |
+| **MILo** | native (learnable SDF→marching cubes) | ✅ | ❌ |
+
+> 3DGS는 surface method가 아님(볼류메트릭 타원체) → TSDF 돌려도 noisy.
+> baseline으로 포함해 "왜 2DGS/MILo가 필요한가"를 정량으로 보임. 표에 "별도 TSDF" 명시.
+
+### 트랙 ② NVS (test PSNR) — depth supervision ablation
+
+| 설정 | 값 |
+|---|---|
+| 학습 | `eval=True`, llffhold=8 → **29 train / 5 test** |
+| test 5장 | `3m_000000, 3m_000008, 3m_000016, 7m_000007, 7m_000015` (자동 선택, llffhold=8) |
+| 평가 | **held-out test 뷰** PSNR↑/SSIM↑/LPIPS↓ |
+
+> 헤드라인 메시지: "② depth supervision이 **안 본 각도(test)** 품질을 얼마나 올리나".
+> ⚠️ train-view PSNR은 암기 점수이므로 **성능으로 제시 금지**. 보여야 하면 "training-view
+> reconstruction fidelity"로 라벨 명시.
+
+**모델별 외부 depth supervision 지원 여부 (2026-06-29 코드 확인):**
+
+| 모델 | 외부 depth 지원 | 방식 | 비고 |
+|---|---|---|---|
+| **3DGS** | ✅ | `--depths` 플래그, invdepth L1 loss (`depth_l1_weight` 지수감소) | 메인 ablation 대상 |
+| **GS-2M** | ❌ | `depths` 인수 존재하나 train.py에 미사용. `depth_normal_loss`는 내부 일관성용 | 외부 depth 불가 |
+| **2DGS** | ❌ | `depth_ratio`는 내부 depth-normal 일관성용. 외부 depth 파이프라인 없음 | 외부 depth 불가 |
+| **MILo** | ✅ | `mast3r_depth_dir` config. depth ordering supervision (rank-based, metric 아님) | 3m_1에서 구현 완료 |
+
+> **결론**: 외부 MASt3R depth supervision은 **3DGS와 MILo에만 적용 가능**.
+> 2DGS/GS-2M은 각 모델 고유의 내부 supervision 방식을 사용하므로 depth ablation 대상 외.
+
+**진행 상황 (2026-06-29 01:14 KST):**
+
+| 모델 | prior | 7k test PSNR | 30k test PSNR | 상태 |
+|---|---|---|---|---|
+| **3DGS** (eval=True) | ① ply-init만 | **20.54** | 19.61 | ✅ 완료 |
+| **3DGS + depth** (eval=True) | ① + ② MASt3R depth | 20.15 | 19.05 | ✅ 완료 |
+| **MILo** (eval=True, 선택) | ① ply-init만 | — | — | ⏳ 낮은 우선순위 |
+
+> **결과 해석**: depth supervision이 오히려 **−0.4dB 악화** (7k 기준).
+> 두 모델 모두 7k에서 peak → 30k에서 과적합 (3DGS 과적합 gap ~1dB).
+> 3m_1 결과(depth +0.09dB 미미)보다도 나쁜 결과 → MASt3R depth와 COLMAP이 동일 metric 스케일임에도
+> 이 씬에서 depth prior는 도움이 되지 않음.
+> **근본 원인 추정**: 34장 중 29장으로만 학습(eval=True) 시 지형 커버리지 부족 + 3m/7m 고도 차이
+> scale mismatch가 depth loss 방향을 혼란시킴.
+
+> ⚠️ 기존 `real_test_combined_uniform__3dgs`는 **eval=False**로 학습됨 (train PSNR=30.80dB).
+> Track ②용: `real_test_combined_uniform__3dgs_eval` (eval=True 재학습).
+
+**depth map 생성 완료 (2026-06-29):**
+- `/tmp/gen_depth_combined.py`: MASt3R pointcloud → 카메라별 투영 → 34장 depth.npy
+  - `R_w2c = R_c2w.T`, `t_w2c = -R_c2w.T @ t_c2w`, focal=969.40px (1920px 기준)
+  - 유효 픽셀: 690k~890k/frame, 깊이 범위 [0.92, 13.2]m ✅
+- `/tmp/convert_depth_combined.py`: .npy → uint16 invdepth PNG + depth_params.json
+  - COLMAP/MASt3R depth 스케일 비율=**0.9899** (동일 metric ✅)
+  - 출력: `real_test_combined_uniform__colmap/depths_png/` (34 PNG)
+  - `sparse/0/depth_params.json` (키: `3m_000000` 형식, 확장자 없음)
+- 3DGS `--depths depths_png` → `source_path/depths_png/` 자동 로드 ✅
+
+**test 프레임** (llffhold=8, 34장 정렬 기준):
+`3m_000000, 3m_000008, 3m_000016, 7m_000007, 7m_000015` (5장)
+
+### 4. 메시 평가 절차 (트랙 ①, 언리얼 GT 받은 후)
+
+```
+0단계  handedness 일치: 언리얼(left-handed) → 한 축 flip(예: Y→−Y) → right-handed
+        ※ Sim(3)는 det(R)=+1만 허용 → 거울상은 ICP로도 안 겹침. flip이 최우선.
+1단계  Sim(3) 정렬: GT 카메라 1:1 대응으로 결정(s≈3.49) + ICP 미세정렬
+2단계  cropping 통일: 복원 메시를 GT bbox(+margin)로 crop, 4개 모델 동일 적용
+        ※ CD 양방향 → 복원 메시의 GT-외 floater가 accuracy 부풀림 방지 (TNT foreground 논리)
+3단계  CD(양방향) + F-score @1cm/5cm/10cm 산출
+```
+
+### 4-1. GT 메시 (언리얼 export 완료, 2026-06-28 수령)
+
+| 항목 | 값 |
+|---|---|
+| **원본 파일** | `gt_scene_full.fbx` (4.0MB, Kaydara FBX Binary, 언리얼 export) |
+| 로컬 | `C:\Users\sdh97\Desktop\학교\캔위성\2차 발표자료\현재결과\gt_mesh\gt_scene_full.fbx` |
+| 서버 | `sdh@sysai3:/home/sdh/Desktop/data/gt_mesh/gt_scene_full.fbx` |
+| 출처 다운로드 | `C:\Users\sdh97\Downloads\my_box.fbx` (중복본 `my_box (1).fbx`는 동일 md5 → 삭제) |
+
+**FBX 내 메시 노드 (Geometry 10개):**
+- `Cube8`~`Cube12` — GT 큐브 5개 (기존 `Cube{8..12}.ply`와 동일)
+- `Cube` — 추가 큐브 1개 (기존 PLY엔 없던 것)
+- `Landscape` — **지면/지형 메시** (= 주변 환경)
+- `MI_LayerGround` — 지면 머티리얼
+- `UCX_*` — 언리얼 충돌 메시 (평가 제외 대상)
+
+> ⭐ **의의**: 이 FBX엔 큐브뿐 아니라 **`Landscape`(지면)**가 포함됨 → 기존 "지면 오염 편향"
+> (GT에 큐브만 있어 crop 안 지면 복원점이 Precision/CD를 왜곡) **해결 가능**.
+> 이제 "물체만(큐브)" 평가와 "환경 포함(큐브+지면)" 평가를 **둘 다** 산출 가능.
+
+### 4-2. FBX → PLY 변환 완료 (2026-06-29, 검증 통과)
+
+**도구**: 서버에 blender/assimp/pymeshlab 전무 → 격리 venv(`/tmp/venv-fbx`)에 `pyassimp` 설치.
+pymeshlab은 11개 메시를 1개로 병합해버려 부적합 → pyassimp로 노드별 접근.
+
+**핵심 발견 — Y축 handedness 반전**:
+- FBX 노드 월드변환 적용 후 큐브 좌표가 PLY와 **X·Z는 일치, Y만 부호 반전**
+  - 예: FBX `Cube8` Y[5063,5103] vs PLY Y[−5103,−5063]
+- 원인: 언리얼(left-handed) FBX export → assimp 임포트 시 Y축 부호. STATUS 0단계 handedness 그 자체
+- **조치**: `Y → −Y` flip 적용 → 기존 검증된 `Cube{8..12}.ply`(카메라 ATE 0.6cm 정렬)와
+  **maxΔ=0.000cm 완전 일치 확인** → 변환 신뢰성 검증됨
+
+**메시 구조 (pyassimp, 노드 월드변환 + Y-flip 적용)**:
+- `Cube8`~`Cube12`: 평가용 큐브 5개 (각 144V/48F)
+- `UCX_Cube*`: 충돌 메시 → **제외**
+- `Landscape`: **z=0 완전 평탄 지면**, ±252m (1.52M V/508k F)
+- `Cube` 노드: 메시 없는 그룹 노드 (무시)
+
+**산출 PLY** (서버 `/home/sdh/Desktop/data/gt_mesh/`, 로컬 `gt_mesh/`, Unreal cm 프레임):
+| 파일 | 내용 | 크기 | 용도 |
+|---|---|---|---|
+| `gt_cubes.ply` | 큐브 5개 | 720V/240F (12K) | **물체-only 평가** |
+| `gt_landscape.ply` | 지면 z=0 | 1.52M V (24M) | 지면 단독 |
+| `gt_scene_clean.ply` | 큐브+지면 (UCX 제외) | 1.52M V (24M) | **환경 포함 평가** (지면 오염 해소) |
+
+**변환 스크립트**: `/tmp/fbx_to_ply.py` (월드변환+Y-flip+UCX제외+큐브 검증 내장)
+
+> ⚠️ **환경 평가 시 주의**: `gt_landscape`는 ±252m 무한지면 → Recall 계산 시 GT를
+> **카메라 가시영역으로 crop** 필요 (안 그러면 미복원 원거리 지면이 Recall≈0 만듦).
+> 물체-only 평가는 큐브 bbox crop으로 충분.
+
+### 4-3. 메시 평가 결과 (2026-06-29, NED 공간 직접 CD)
+
+**평가 방법** (`/tmp/eval_env.py`):
+- 정렬: **3m Umeyama** (COLMAP→NED), s=3.0798, ATE=0.60cm (큐브가 3m 카메라 바로 아래)
+- NED(m) 공간 직접 CD/F-score, **밀도 일관 샘플링** (crop 영역 face만 80k 동일)
+- 환경 평가: 카메라 지면 footprint(2.1×2.1m)+1m crop, z∈[−1.2,0.3]
+- 물체 평가: 큐브 bbox+5cm crop
+
+**환경 포함 (gt_scene_clean = 큐브+지면)** — 지면 오염 해소된 정식 평가:
+
+| 순위 | 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
+|---|---|---|---|---|---|
+| 🥇 | **2DGS** | **6.85cm** | 0.028 | **0.156** | **0.914** |
+| 🥈 | GS-2M | 7.47cm | 0.020 | 0.123 | 0.897 |
+| 🥉 | MILo | 11.17cm | 0.008 | 0.080 | 0.366 |
+| 4 | 3DGS+TSDF | 89.80cm | 0.000 | 0.000 | 0.000 |
+
+**물체-only (gt_cubes = 큐브 5개)** — 참고:
+
+| 순위 | 모델 | CD↓ | F@5cm | F@10cm |
+|---|---|---|---|---|
+| 🥇 | **2DGS** | **4.93cm** | **0.635** | **0.800** |
+| 🥈 | GS-2M | 5.15cm | 0.622 | 0.789 |
+| 🥉 | MILo | 7.32cm | 0.448 | 0.659 |
+| 4 | 3DGS+TSDF | 큐브 bbox 내 surface 0개 (복원 실패) | — | — |
+
+> **해석** (최종, 4모델):
+> - **순위: 2DGS > GS-2M > MILo ≫ 3DGS** (물체·환경 일관)
+> - **2DGS ≈ GS-2M**: F@10 0.914 vs 0.897, 거친 형상 모두 양호. 1~5cm 정밀도에서 2DGS 근소 우위.
+> - **MILo 환경 F@10=0.366** (2DGS의 절반↓): MILo 메시의 **가장자리 스파이크 노이즈**가 지면
+>   평탄도를 깸 (이전 real_test에서도 관찰된 MILo 고질). 물체-only(F@10=0.659)는 상대적으로 양호.
+> - **3DGS는 surface method 아님** → TSDF 메시가 수직 2.7m 두께 노이즈, 지면이 GT보다
+>   0.16~2.86m 위에 분포 → 환경 CD 89.8cm, 큐브 bbox 내 surface 전무. baseline으로서
+>   "왜 2DGS/GS-2M/MILo가 필요한가"를 정량 입증 (3DGS 원본 가우시안 top-view 시각자료도 확보).
+
+> ⚠️ **검증 이력 (편향 제거)**: 초기 평가는 ① 전체메시 균일샘플 → crop 영역 밀도 불일치,
+> ② margin 과대(11cm) → 지면 오염으로 CD 부풀림. 밀도 일관 샘플 + GT에 지면 포함으로 수정.
+> Recall@5cm은 margin 무관하게 robust (2DGS 1.0 vs 3DGS 0.096 — 초기부터 일관).
+
+### 4-4. MILo SOR 출력메시 실험 (2026-06-29, 재학습 없이 출력 메시에 SOR 적용)
+
+**방법**: `mesh_learnable_sdf.ply` (5,029,391V) → open3d SOR → 3강도 메시 저장 → 재평가  
+**환경**: `recon3d` env (open3d 0.19.0, libstdc++ 호환)
+
+| 강도 | nb | std | 보존V(%) | 출력 파일 |
+|---|---|---|---|---|
+| weak   | 30 | 2.0 | 96.7% (4,862,809V) | `mesh_sor_weak.ply` |
+| mid    | 30 | 1.0 | 91.9% (4,624,059V) | `mesh_sor_mid.ply` |
+| strong | 30 | 0.5 | 86.6% (4,354,600V) | `mesh_sor_strong.ply` |
+
+**물체-only (gt_cubes) 평가:**
+
+| 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
+|---|---|---|---|---|
+| MILo 원본 | 7.32cm | 0.081 | 0.448 | 0.659 |
+| SOR_weak   | 7.24cm | 0.082 | **0.449** | **0.661** |
+| SOR_mid    | **7.17cm** | 0.070 | 0.437 | 0.659 |
+| SOR_strong | 7.57cm | 0.039 | 0.368 | 0.631 |
+
+**환경포함 (gt_scene_clean) 평가:**
+
+| 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
+|---|---|---|---|---|
+| MILo 원본 | 11.17cm | 0.008 | 0.080 | 0.366 |
+| SOR_weak   | 10.99cm | 0.008 | 0.082 | 0.375 |
+| SOR_mid    | **10.81cm** | 0.008 | 0.078 | **0.390** |
+| SOR_strong | **10.81cm** | 0.005 | 0.064 | 0.406 |
+
+> **결론**: 출력 메시 SOR은 효과가 미미하다.
+> - **SOR_mid**: 환경 F@10 0.366 → 0.390 (+0.024, +6.6%) 개선이 가장 좋은 tradeoff.
+> - **SOR_strong**: 환경 F@10 0.406이지만 물체 F@10 0.631로 크게 하락 (큐브 표면 정점 과도 제거).
+> - **전체 결론**: 출력 메시 SOR은 이전 COLMAP prior SOR 실험과 동일하게 효과 미미.
+>   MILo 한계(환경 F@10≈0.4)는 edge spike 노이즈 구조 문제 → 알고리즘 수준 해결 필요.
+> - **최종 순위(환경 F@10) 변경 없음**: 2DGS(0.914) > GS-2M(0.897) ≫ MILo_SOR_mid(0.390) ≫ 3DGS(0.000)
+
+### 5. 시뮬레이션 실험 최종 결론 (2026-06-29 확정)
+
+### 핵심 결론
+
+| 항목 | 결론 |
+|---|---|
+| **최고 모델 (메시)** | **2DGS** — CD 6.85cm, F@10 0.914, 모든 지표 1위 |
+| **2위** | GS-2M — F@10 0.897, 근접하지만 전 지표 2위 |
+| **NVS depth prior** | 효과 없음 (−0.4dB 악화). depth가 아닌 데이터 품질이 병목 |
+| **GS-2M < 2DGS 이유** | BRDF 추정이 photometric gradient 부재 씬에서 ill-posed → 기하 왜곡 |
+| **다른 모델도 못 이김** | 이 씬의 한계(텍스처 빈약+sparse view)는 알고리즘이 아닌 데이터 문제. 복잡한 방법일수록 역효과 |
+
+### 조건부 명제 (일반화 주의)
+
+> **"텍스처가 빈약한 미터 스케일 sparse-view 야외 씬에서는 BRDF 기반 방법이 단순 surfel 기반보다 불리하다"**
+>
+> GS-2M을 이기려면 더 좋은 알고리즘이 아니라 **더 좋은 데이터(텍스처, dense view)**가 필요.
+> 실제 드론 데이터(자연 텍스처 존재)에서는 결과가 달라질 수 있음.
+
+### F-score 스케일 해석 기준
+
+- F@1cm 낮음(0.028): 결함 아님. 미터 스케일 씬에서 1cm는 의도적으로 tight한 임계값
+- F@10cm 기준(0.914): 이 씬의 실용적 정확도 지표
+- CD 6.85cm: NED meter 기준 ~2m orbit 씬에서 합리적 수치
+
+---
+
+### 6. 의존성 / 시작 순서
+
+| 트랙 | 필요 입력 | 상태 |
+|---|---|---|
+| **MASt3R-SfM** (포즈 + ply) | `real_test_3m_uniform` + `real_test_7m_uniform` | ✅ **완료** |
+| **COLMAP 변환** (`build_colmap_uniform.py`) | poses.npy + pointcloud.ply | ✅ **완료** → `real_test_combined_uniform__colmap/` |
+| **3DGS** (30k, gs3d env) | COLMAP | ✅ 학습+TSDF메시 완료 |
+| **2DGS** (30k, venv-2dgs) | COLMAP | ✅ 학습+메시 완료 |
+| **GS-2M** (30k, miniforge3/gs2m) | COLMAP | ✅ 학습+메시 완료 |
+| **MILo** (18k, venv-milo, outdoor+radegs) | COLMAP | ✅ 학습+메시 완료 |
+| 메시 추출 (4모델) | 학습 완료 체크포인트 | ✅ **완료** |
+| 메시 CD/F-score 평가 | GT + 4모델 메시 | ✅ **완료** (4-3 결과표) |
+| NVS depth ablation (3DGS eval=True) | MASt3R depth map 34장 | ✅ 완료 (peak PSNR 20.54 @7k) |
+| NVS depth ablation (3DGS+depth eval=True) | MASt3R depth map 34장 | ✅ 완료 (peak PSNR 20.15 @7k) |
+
+### 메시 추출 명령 (학습 완료 후)
+| 모델 | 명령 |
+|---|---|
+| 2DGS | `render.py --voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04 --num_cluster 1` |
+| GS-2M | `render.py --extract_mesh --skip_test` |
+| MILo | `mesh_extract_sdf.py` |
+| 3DGS | 별도 open3d TSDF 후처리 |
+
+---
+
+
+## 시뮬레이션 4m 독립 데이터셋 구축 (2026-06-29)
+
+> **독립 데이터셋**: `real_test_4m_old`는 AirSim/Unreal 단일 씬의 4m 고도 시뮬레이션.
+> 3m, 7m과 동일 씬 → GT 메시 재사용 가능. 다고도 조합 실험용으로 사용.
+
+### 실험 조건
+
+| 항목 | 값 |
+|---|---|
+| 데이터 | 4m 고도, **17장** |
+| 이미지 경로 | `datasets/real_test_4m_old/rgb/` (000000~000016.png) |
+| 해상도 | 1920×1080 |
+| GT 메시 | 동일 (`gt_scene_clean.ply`, `gt_cubes.ply`) |
+| prior | **① ply 초기화** 전 모델 공통 적용 (MASt3R pointcloud) |
+| 외부 depth | ❌ 없음 (공정 비교) |
+
+### 포즈 품질 (Umeyama Sim3, 2026-06-29)
+
+| 항목 | 4m old (17장) | 3m uniform (참고) |
+|---|---|---|
+| ATE RMSE | **0.029 cm** | 0.76 cm |
+| ATE Max | 0.095 cm | — |
+| RPE 회전 Mean | 0.58° | 0.23° |
+| Scale | 3.865 | 3.08 |
+
+> 단일 고도 단독 실행 → scale mismatch 없음 → ATE 매우 우수.
+
+### 학습 진행 상황 (2026-06-29 갱신)
+
+| 모델 | 환경 | 상태 |
+|---|---|---|
+| **2DGS** | venv-2dgs | ✅ 학습+메시 완료 |
+| **3DGS** | miniforge3/gs3d | ✅ 학습 완료 |
+| **GS-2M** | miniforge3/gs2m | ✅ 학습(30k, PSNR 31.74) + 메시 완료 |
+| **MILo** | venv-milo | ✅ 학습(18k) + 메시 완료 |
+
+> **메시 산출물 (2026-06-29, 4모델 전부 완료)**
+> - GS-2M: `real_test_4m_old__gs2m/train/ours_30000/mesh/tsdf_post.ply` (193M, 3.94M V)
+> - MILo: `real_test_4m_old__milo/mesh_learnable_sdf.ply` (146M, vertex color 포함)
+> - 메시 추출 명령: GS-2M `render.py -m <out> --extract_mesh --skip_test` / MILo `mesh_extract_sdf.py -s <colmap> -m <out> --rasterizer radegs` (milo/milo/ 에서)
+> - 메시 추출 명령(추가): 2DGS `render.py -m <out> -s <colmap> --num_cluster 1` (voxel_size/depth_trunc/sdf_trunc는 지정하지 말 것 — 아래 주의사항 참고) / 3DGS `/tmp/run_3dgs_tsdf_4m.py` (open3d TSDF)
+> - ⚠️ **주의**: 과거 이 문서에 2DGS 명령을 `--voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04` 절대값으로 기록했었으나, 이는 GT-free 원칙 위반이자 불필요한 오버라이드였음. GS-2M/2DGS 모두 이 인자들을 비워두면(기본값 -1) 카메라 포즈 기반 씬 반지름(GS-2M: `cameras_extent`, 2DGS: `radius`, 둘 다 GT 불필요)으로 자동 스케일링됨 — MASt3R가 up-to-scale이라 씬마다 절대값이 다르게 맞아야 하므로 반드시 기본값(자동 계산)을 쓸 것. (2026-07-06, [[pipeline_improvement_plan]] 4번 항목 조사에서 확인)
+
+### 메시 CD/F-score 평가 결과 (2026-06-29, GT 큐브 Cube8-12 기준)
+
+> 정렬: MASt3R poses ↔ GT meta(NED) **Umeyama Sim3 1회** (단일 17장, ATE 1.86cm, s=3.865).
+> 평가 스크립트: `/tmp/eval_mesh_4m_old.py` (combined_uniform 평가의 4m old 버전).
+> GT를 COLMAP 공간으로 역변환 후 큐브 주변 crop → CD/F@thr (threshold는 COLMAP scale 적용).
+
+| 순위 | 모델 | CD↓ | F@1cm↑ | F@5cm↑ | F@10cm↑ |
+|---|---|---|---|---|---|
+| 🥇 | **2DGS** | **3.63cm** | 0.2483 | **0.5408** | **0.8556** |
+| 🥈 | **GS-2M** | 3.69cm | 0.2743 | 0.5280 | 0.8496 |
+| 🥉 | **MILo** | 3.77cm | **0.2746** | 0.5284 | 0.8350 |
+| — | 3DGS | 측정불가 | — | — | — |
+
+> **3DGS 측정불가**: TSDF 메시가 GT 큐브 영역 crop 후 표면 0개 → 큐브 복원 실패(floater/지면 위주).
+> combined_uniform에서도 3DGS 환경 F@10=0.000 → **동일 현상**.
+
+#### 기존 3m+7m(combined_uniform) 물체 결과와 비교
+
+| 모델 | 4m old CD | 4m F@10 | combined 물체 CD | combined 물체 F@10 |
+|---|---|---|---|---|
+| 2DGS | 3.63cm | 0.856 | (최고) | 0.914 |
+| GS-2M | 3.69cm | 0.850 | 5.15cm | 0.789 |
+| MILo | 3.77cm | 0.835 | 7.32cm | 0.659 |
+| 3DGS | 실패 | — | 실패 | 0.000 |
+
+> **결론: 순위·경향 기존과 동일** — 2DGS ≥ GS-2M > MILo ≫ 3DGS, 3DGS 메시 붕괴도 재현.
+> **차이점**: 4m 단독(17장)은 scale mismatch가 없어 CD 절대값이 전반적으로 더 낮고(3.6~3.8cm),
+> **모델 간 격차가 매우 작음**(0.14cm 차). combined는 3m↔7m inter-orbit 오차로 모델 간 격차가 컸음(5→7cm).
+> → 데이터 품질(단일고도 균일)이 좋을수록 모델 선택의 영향이 줄어든다는 점을 정량 확인.
+
+#### 박스(큐브)만 tight crop 결과 (±5cm, 지면 제외, 2026-06-30)
+
+> 스크립트: `/tmp/eval_box_crop_4m.py`. GT 큐브 5개 각각 bbox±5cm만 pred에서 crop → CD/F-score.
+> 지면 floater 제외로 큐브 복원 정확도만 순수 측정.
+
+| 모델 | CD↓ | F@1cm↑ | F@5cm↑ | F@10cm↑ |
+|---|---|---|---|---|
+| **2DGS** | **2.11cm** | 0.3850 | **0.7893** | 1.000 |
+| **GS-2M** | 2.14cm | **0.4324** | 0.7793 | 1.000 |
+| **MILo** | 2.13cm | 0.4309 | 0.7881 | 1.000 |
+| 3DGS | 실패(0개) | — | — | — |
+
+> **해석**: CD는 2DGS가 미세하게 유리(floater 없음), F@1cm는 GS-2M이 높음(조밀 vertex → 근접 커버리지 우위).
+> CD와 F@1cm의 상충은 각 지표의 특성 차이: CD는 outlier(먼 점)에 민감, F@1cm는 근접 커버리지에 민감.
+
+#### 논문 DTU 벤치마크 CD vs 우리 시뮬 4m 비교
+
+| 모델 | 우리 4m CD (박스 crop) | 논문 DTU CD | 씬 조건 |
+|---|---|---|---|
+| **2DGS** | **2.11cm** | **~0.48mm** | DTU: 텍스처 풍부, 49+장, 물체 스케일 |
+| **GS-2M** | 2.14cm | ~0.80mm | DTU: GS-2M 논문 자체 보고 |
+| **MILo** | 2.13cm | ~0.62mm | DTU 기준 추정 |
+| **PGSR** | 미실험 | 0.52mm | DTU 최고 성능 참고값 |
+
+> **절대값 차이(~25×)**: DTU는 cm 스케일 물체·정밀 3D 스캐너 GT. 우리는 4m 고도 항공 씬·17장. 씬 스케일 상이 → 직접 비교 불가.
+> **순위 비교**: 2DGS ≥ GS-2M 경향은 DTU·우리 씬 모두 유사. 단, 우리 씬은 저텍스처+sparse view로 GS-2M BRDF 분해가 ill-posed → 모델 간 격차가 DTU보다 훨씬 작음(0.03cm 차).
+
+### 실행 명령 (4m old — 재현용)
+
+```bash
+# GS-2M (30k)
+source /home/sdh/miniforge3/bin/activate gs2m && \
+python3 /home/sdh/Desktop/models/GS-2M/train.py \
+  -s /home/sdh/Desktop/data/experiments/real_test_4m_old__colmap \
+  -m /home/sdh/Desktop/data/experiments/real_test_4m_old__gs2m \
+  --iterations 30000 --port 6012
+
+# MILo (18k, outdoor+radegs 필수, milo/milo/ 에서 실행)
+source /home/sdh/Desktop/venvs/venv-milo/bin/activate && cd /home/sdh/Desktop/models/milo/milo && \
+python3 train.py \
+  -s /home/sdh/Desktop/data/experiments/real_test_4m_old__colmap \
+  -m /home/sdh/Desktop/data/experiments/real_test_4m_old__milo \
+  --iterations 18000 --port 6013 --imp_metric outdoor --rasterizer radegs
+```
+
+> ⚠️ 주의: MILo는 `--imp_metric outdoor --rasterizer radegs` 빠뜨리면 안 됨.
+> COLMAP/PLY prior 경로: `real_test_4m_old__colmap`, `real_test_4m_old__mast3r/pointcloud.ply`.
+
+---
+
+
+## retrieval-20-5 채택 & GS-2M 파이프라인 개선 조사 (2026-07-05~07)
+
+> 상세 근거/수치는 전부 `pipeline_improvement_plan.md`에 있음. 여기는 요약+포인터만.
+
+### scene_graph=retrieval-20-5 최종 채택 (2026-07-05)
+
+- swin-5(순차 슬라이딩 윈도) 대신 MASt3R-SfM `scene_graph=retrieval` (Na=20 anchor, k=5 neighbor)로 전환.
+- 근거: 3m+7m 다고도 조합에서 ATE 10배 개선(박스 분리 문제 해결), 4m 단일고도에서도 궤도 매끄러움 1.9% 개선, 5m_1 실제 드론 데이터에서도 동등 이상.
+- **모든 신규 실험은 retrieval-20-5를 기본값으로 사용할 것.**
+
+### GS-2M 파이프라인 개선 4항목 조사 결과 (2026-07-06~07, `real_test_4m_old` 4m 시뮬 데이터 기준)
+
+| # | 항목 | 결론 |
+|---|---|---|
+| 2 | Depth Supervision | GS-2M 미지원(죽은 배선) — 구현 비용 大, 보류 |
+| 3 | Confidence/voxel/SOR 필터링 | ✅ 완료. GT-free 적응형 voxel(median NN distance 배수) 설계, k=1.4(~1cm)가 메시 단계 최종 최적(raw 대비 CD -1.2%, F@1cm +6.3%) |
+| 4 | 메시 추출 파라미터 정규화 | ✅ 이미 구현되어 있었음 — GS-2M/2DGS 둘 다 voxel_size 등을 비워두면 카메라 포즈 기반 자동 스케일링(GT 불필요). 과거 STATUS.md의 2DGS 하드코딩 명령은 안티패턴이라 삭제 |
+| — | 표면 지터 노이즈 / 딥러닝 디노이저 검토 | 오라클 실험 3종(discrete-snap/dedup/연속표면투영-밀도보존) 전부 raw/k1.4보다 나쁨(CD 2.46/2.43 vs 2.79~3.15cm) → 밀도를 count 기준 완전히 보존해도 결과가 나쁨 → 병목은 밀도 손실만이 아니라 **정확도 개선 개입 자체**(색상-위치 불일치, 단순 평면 표면에서 노이즈의 자연 산포가 오히려 Gaussian 국소형상 추정에 유리했을 가능성). 병합형(voxel/confidence merging)·변위형(StraightPCF 등) 디노이저 모두 폐기 |
+
+**핵심 방법론 교훈**: 점군 단계 proxy 지표(CD/F-score)로 고른 최적 파라미터가 GS-2M 메시 단계에서 정반대로 뒤집힘 — 반드시 최종 소비 단계까지 검증할 것. 오라클(이론적 최선) 실험도 밀도 보존 여부를 반드시 별도 확인해야 함(discrete-snap은 겉보기 count 유지에도 실제로는 밀도가 붕괴할 수 있음). 이 병목(작은 물체+저뷰수 씬에서 점 정확도 개선이 순이득이 아님)을 다루려면 "노이즈 제거/정교화"가 아니라 "관심 영역 점 늘리기" 방향이 유망한 다음 후보.
+
+### swin-5 vs retrieval-20-5 × raw vs filtered(k1.4) 4개 조합 최종 메시 검증 (2026-07-09)
+
+> 상세는 `pipeline_improvement_plan.md` §⑫. `real_test_4m_old` 기준 4개 전부 GS-2M 30k 학습→메시→`eval_mesh_4m_old_v2.py` 평가 완료.
+
+| | raw | filtered(k1.4) |
+|---|---|---|
+| **swin-5** | CD 18.05cm, F-score 전부 0 (박스 복원 실패, crop 내 점 0.2%) | **CD 4.20cm**, F@10cm 0.81 (극적 개선) |
+| **retrieval-20-5** | CD 2.46cm, F@10cm 0.99 | CD 2.43cm, F@10cm 0.99 (미미한 개선) |
+
+> **핵심 발견**: "필터링 효과는 미미하다"는 기존 결론(§9 표 3번 항목)은 **retrieval-20-5 한정**이었음. SfM 품질이 나쁜 swin-5에서는 필터링이 복원 성패 자체를 가름 — raw는 박스 영역이 통째로 비어 F-score 0, 필터링 후에야 정상 복원. voxel dedup+SOR이 swin-5의 (아직 원인 미확인) 과밀/중복 노이즈를 제거해준 것으로 추정. retrieval-20-5 우위 자체는 변함없음.
+
+---
+
+
+## 4m_old 박스 복원 버그 수정 + 그림자 전처리 실험 (2026-07-10)
+
+### ⓪ 배경: 7/5 이후 박스 소실 버그 진단·수정
+
+4m_old(17장 시뮬)에서 6/29에 성공했던 박스 복원이 7/5 이후 실행에서 **박스가 안 보이는** 문제 발생. 원인 2가지 확정:
+
+| # | 버그 | 실패값 → 수정값 | 영향 |
+|---|---|---|---|
+| 1 (주) | **COLMAP focal 스케일백 누락** | 260.4px → **979.7px** (×1920/512) | 512px 기준 focal을 1920px에 그대로 사용 → FOV 89°가 아닌 150° 어안 → 기하 뭉개짐 → TSDF 150만~420만 조각 파편화 → 1-cluster 후처리가 박스 삭제. PSNR은 31dB 나와서(가우시안 2배 보상) 지표만 보면 정상처럼 보이는 함정 |
+| 2 (부) | **`--shared_intrinsics` 누락** | 프레임별 focal 제각각 → 공유 | ATE 8.90cm → 1.86cm |
+
+> 주의: MASt3R는 실행마다 좌표계가 임의로 잡히므로 **poses.npy 값 자체가 달라지는 건 정상**(내부일관성 ATE만 보면 됨). prior PLY도 정상이었음.
+> 1번(swin5_raw)만 살아남았던 건 raw여서가 아니라 **버그 발생 전 6/29에 학습**된 산출물이었기 때문.
+
+### ① 수정 후 4-combo 결과 (retrieval vs swin × raw vs k1.4 필터)
+
+focal 979.7 + shared_intrinsics 적용, 4개 전부 박스 복원 성공.
+
+| 조합 | 전체 CD | ATE |
+|---|---|---|
+| swin_raw | 3.70cm | 1.86cm |
+| swin_k1.4 | 3.73cm | 1.86cm |
+| retr_raw | 2.80cm | 1.90cm |
+| **retr_k1.4** | **2.72cm** | 1.90cm |
+
+→ **retrieval-20-5가 swin-5보다 ~25% 우수**, k1.4 필터는 retrieval에서만 소폭 개선. 기존 "retrieval + k1.4" 채택 방향이 올바른 focal에서도 유효함 재확인.
+
+### ② 그림자 요철 개선 — 이미지 전처리 3종 실험
+
+문제: ㄷ자 오목부(요철) **그림자 영역에 prior 점이 희박**해 GS-2M이 벽을 못 세움.
+전처리 3종을 retrieval-20-5(raw)로 각각 MASt3R→GS-2M 학습. baseline = 무전처리 retr_raw.
+
+| 변형 | 출처 | 방법 |
+|---|---|---|
+| edge | 내(사용자) 아이디어 | FFT 하이패스(엣지만) |
+| gamma | Claude 추천 | γ=0.6 그림자 밝히기 |
+| clahe | Claude(GS 표준 전처리) | LAB-L에 CLAHE(clip2.0, 타일8×8) |
+
+### ③ 핵심 발견: 측정 범위별로 승자가 완전히 다름
+
+| 변형 | 전체 씬 CD | 박스(5cm) CD | 요철 CD | 요철 pred점 | 요철 정밀도(pred→gt) | 요철 void점(적을수록↑) |
+|---|---|---|---|---|---|---|
+| baseline | **2.80** | **1.76** | 8.30 | 370 | 8.87cm | 107 |
+| gamma | 2.76 | 2.02 | 9.19 | 376 | 8.67cm | 114 |
+| clahe | 4.08 | 2.34 | 6.46 | 514 | 7.15cm | 117 |
+| edge | 11.01 | 2.36 | **5.65** | **648** | **4.78cm** | **63** |
+
+- **밝은 박스 표면**: baseline 최고 (전처리는 노이즈만 추가)
+- **그림자 요철(점-거리 지표)**: edge > clahe >> baseline > gamma
+- edge는 **전역 최악(11cm, 배경 쓰레기 웹)·요철 국소 최고** → 그대로는 못 씀
+
+### ④ 결정적: CD가 이 데이터셋의 시각품질 지표로 부적합
+
+육안(CloudCompare)으로 본 오목부 형상 충실도:
+- **clahe = 최고**: 외곽선은 거칠지만 오목부가 또렷이 열려 벽·틈이 명확 (ㄷ자 가장 정확)
+- **edge**: 표면 매끈하나 **안쪽 코너를 둥글려 오목부를 메꿈**(형상 뭉개짐) — "그림자 연결돼 보임"의 정체
+- **gamma**: 쪼그라들고 녹은 형태 (최악)
+
+→ **CD/정밀도는 "매끈하지만 코너 뭉개짐(edge)"을 편애**하고 "거칠지만 형상정확(clahe)"에 벌점. **위상 충실도를 못 잡음.** README 1차 기준이 "시각적 품질"이므로 **clahe가 실질 승자**(사용자 첫 직감과 일치).
+
+정리:
+- 형태 충실도(육안, 오목부): **clahe > edge > gamma**
+- 표면 매끄러움: edge > gamma > clahe
+- 평균 CD: baseline > gamma > clahe > edge (형상충실도와 역상관 → 신뢰 부적합)
+
+### ⑤ 산출물 위치
+
+- 서버: `real_test_4m_old__colmap_retr_{edge,gamma,clahe}_raw__gs2m/` (메시), `real_test_4m_old__mast3r_retr_{edge,gamma,clahe}/` (prior)
+- 평가 스크립트: `eval_mesh_boxcrop.py`(박스 타이트), `eval_mesh_notch.py`(요철), `eval_notch_precision.py`(정밀도/재현율/void 분리)
+- 전처리: `preprocess_3variants.py` / 파이프라인: `run_3variants_full.sh`
+- 윈도우 바탕화면: `4m_old_prep_mesh_{edge,gamma,clahe}.ply`, `4m_old_prep_prior_*.ply`
+
+### ⑥ 다음 스텝 (clahe 후속, 미실행)
+
+clahe 강점(국소대비→그림자 형상) 유지 + 약점(거친면·배경쓰레기) 제거:
+1. **clahe + bilateral 디노이즈**: 엣지보존하며 표면 노이즈만 제거 (최우선)
+2. **clahe_soft**: clip1.5 + 타일16 + γ0.8 (완만한 그림자회복)
+3. **clahe 마스킹**: 그림자 픽셀에만 적용, 밝은면·배경 원본 (배경오염 차단)
+4. **clahe prior + k1.4 필터**: 이미지 재처리 없이 배경 쓰레기 정리 (제일 쌈, GS-2M 1회)
+
+### ⑦ 요소별 순차 실험 — confidence 완화 기각, Dense MVS 부분 성공 (2026-07-10)
+
+**동기**: "raw에서 할 수 있는 최대한의 전처리를 시도 → 유의미한 결과 앙상블" 방침 확정.
+축 분류: ①이미지 전처리(위 ②에서 완료) ②MASt3R confidence 완화 ③Dense MVS(점 채우기) ④GS 단계 내부 튜닝 ⑤평가지표.
+
+**② confidence 완화 — 기각.**
+`min_conf_thr` 1.5→1.0→0.5로 완화(매칭 캐시 재사용, 재매칭 없음), notch bbox 내 점 개수 측정:
+
+| min_conf_thr | notch 점 | void 점 |
+|---|---|---|
+| 1.5(기존) | 1,750 | 697 |
+| 1.0 | 1,750 | 697 |
+| 0.5 | 1,747 | 698 |
+
+완화로 늘어난 점(1.3만~2.3만)은 전량 notch 바깥(배경)에 낙하 → **그림자는 confidence 문제가 아니라 애초에 매칭 신호 자체가 없음**. GS 재학습 없이 폐기.
+
+같은 방식으로 ①(edge/gamma/clahe) prior도 재검증: notch 점 raw 1,750 > gamma 1,610 > clahe 1,599 > edge 762.
+**raw가 이미 notch 점 최다** — clahe의 시각적 우위는 prior 커버리지가 아니라 GS 단계 photometric 최적화 효과로 재해석.
+
+**③ Dense MVS(COLMAP patch_match_stereo + stereo_fusion) — 부분 성공.**
+raw prior의 sparse COLMAP 모델(포즈 고정) 위에 dense stereo를 얹어 점을 채움. 디버깅 중 숨은 기본값 문제 3개 발견:
+- `depth_min/max` 미지정 시 실패 → 카메라 좌표계 깊이 분포(1~99%ile)로 수동 계산해 지정
+- `write_consistency_graph`(기본 `0`) 꺼져있으면 fusion이 무조건 0점 반환
+- `StereoFusion.min_num_pixels`(기본 5)가 17장 sparse-view(넓은 베이스라인)엔 과함 → 2도 0점, **1로 낮춰야** 함(어차피 cross-view consensus는 patch_match 단계의 `filter_min_num_consistent=2`에서 이미 적용됨, fusion에서 또 요구하면 이중 필터링)
+
+결과(voxel 다운샘플 후 147만점 vs 450만점 비교):
+
+| | notch 점 | void 점 | notch/void |
+|---|---|---|---|
+| sparse raw(기존) | 1,750 | 697 | 2.51 |
+| dense(voxel_mult 6.0, 147만점) | 1,611 | 481 | 3.35 — but notch **절대량 기존보다 감소** |
+| **dense(voxel_mult 2.8, 450만점)** | **5,051** | 1,536 | 3.29 |
+| dense(무압축, 1030만점) | 9,001 | 2,665 | 3.38 |
+
+voxel 다운샘플은 공간적으로 균일해서 세게 걸면 notch 이득이 사라짐 → 450만점 버전 채택, `colmap_dense_raw` 빌드 후 GS-2M 학습(**raw baseline과 동일 파라미터**: `--iterations 30000`, 추가 플래그 없음).
+
+**최종 메시 지표 (raw baseline vs dense_raw, 동일 crop):**
+
+| 지표 | raw baseline | dense_raw |
+|---|---|---|
+| notch mesh 점 수 | 370 | 587 (+59%) |
+| notch CD | 8.30cm | 8.45cm |
+| notch F@5cm | 0.358 | 0.367 |
+| notch 정밀도(pred→gt) | 8.87cm | 9.42cm |
+| notch 재현율(gt→pred) | 7.73cm | 7.48cm |
+| notch spurious>5cm | 62.4% | 64.2% |
+| **void(열린 입) floater 점** | 107 | **193 (+80%)** |
+| 전체 box CD | 3.78cm | 3.77cm |
+
+**해석**: notch 점은 늘었지만(+59%) void 가짜 floater도 비슷하거나 더 늘어(+80%) 지표상 우열 불명확 — dense fusion이 그림자 표면과 빈 공간 노이즈를 구분 없이 같이 채웠기 때문(전역 union의 한계).
+육안 확인(CloudCompare, 사용자 보고): **"표면은 dense가 더 좋게 나옴, 다만 요철 부분 오염은 여전함"** — 정량 지표(void floater 증가)와 일치하는 소견.
+
+**다음 후보**:
+1. **외과적 union**: dense 점을 notch bbox로만 crop + 로컬 outlier 제거 → raw baseline prior(전역 검증됨)에 patch로만 삽입, 나머지 씬은 오염 없이 유지 (미실행)
+2. **clahe 이미지로 Dense MVS 재시도**: clahe가 대비를 살려 매칭 신호가 원본보다 강할 수 있어 floater가 raw보다 적을 가능성 (미실행)
+3. ④(GS 내부: densify 완화, depth/normal prior, opacity entropy) — 아래 실행함
+
+**산출물**: 서버 `real_test_4m_old__colmap_dense_raw__gs2m/`, dense 점구름 `real_test_4m_old__colmapfix_retr_raw/dense/fused_ds.ply`(450만점). 윈도우 바탕화면 `4m_old_dense_raw.ply`, `4m_old_raw_baseline.ply`.
+
+### ⑧ GS-2M 내부 floater 억제 옵션(`use_opacity_reduce`) 실험 — 효과는 있으나 미미 (2026-07-10)
+
+**배경**: 외부 논문 조사(DN-Splatter/2D-SuGaR, adaptive densification+planar prior, GSurf/StableGS opacity entropy, G4Splat/Gaussian Scenes 생성모델)로 ④(GS 내부 튜닝) 방향을 구체화하려던 중,
+GS-2M 코드 확인 결과 **depth-normal 일관성 손실은 이미 기본값으로 전 실험(raw/dense 포함)에 적용 중이었음**을 발견(`lambda_depth_normal=0.03`, `lambda_multi_view=1.0`, `geometry_from_iter=5000` — 이미 5000~30000 iter 구간 내내 활성).
+반면 **`use_opacity_reduce`(500 iter마다 opacity를 0.8로 캡 — "Periodically reduce opacity to remove floaters" 주석)는 기본값 `False`로, 지금까지 모든 런에서 꺼진 채였음** → dense MVS의 void floater 문제(②참고, +80%)에 정확히 대응하는 미사용 레버 발견.
+
+**실험**: `colmap_dense_raw`(dense MVS prior, ⑦ 참고) 소스에 `--use_opacity_reduce` 플래그 하나만 추가, 나머지 파라미터(`--iterations 30000`) 동일 유지하고 재학습.
+
+| 지표 | raw baseline | dense_raw | **dense_opred** |
+|---|---|---|---|
+| notch mesh 점 | 370 | 587 | 562 |
+| notch CD | 8.30cm | 8.45cm | **8.18cm**(최고) |
+| notch F@5cm | 0.358 | 0.367 | **0.374**(최고) |
+| notch spurious>5cm | 62.4% | 64.2% | 62.1%(최소) |
+| **void floater 점** | **107** | 193 | 186 |
+| 전체 box CD | 3.78cm | 3.77cm | 3.78cm |
+
+**결론**: notch 지표 전반이 소폭 개선되고 void floater도 193→186로 약간 줄었으나, **raw baseline(107)에는 한참 못 미침** — 효과는 실재하나 결정적이지 않음.
+원인 추정: opacity 상한 캡은 "순한 감쇠"라 이미 자리잡은 floater를 확실히 제거하지 못함(GSurf/StableGS의 진짜 entropy 정규화 항보다 약한 메커니즘). 하이퍼파라미터(`opacity_reduce_interval` 축소, cap 하향)로 더 튜닝하는 것보다, **다음 후보 1번(외과적 union)이 근본적으로 더 확실한 해법**으로 판단 — void 영역에 dense 점 자체가 안 들어가게 원천 차단.
+
+**산출물**: 서버 `real_test_4m_old__colmap_dense_raw_opred__gs2m/`.
+
+### ⑨ 보편(GT-free) 기준 전환 + **근본원인 발견: dense MVS 점구름 20cm 계통 오프셋** (2026-07-11)
+
+**방침 전환**: 사용자 지시로 "이 데이터셋 전용(GT bbox 수동 crop)" 방법 배제, **어느 씬에나 적용 가능한 보편 기준**만 사용. GT는 검증(notch/void 측정)에만 사용.
+
+**⑨-1. TSDF 재추출 실험 (D1/D2, 재학습 없음, 씬 무관 파라미터)**
+
+| 지표 | dense_opred 기준 | D1 `--filter_depth` | **D2 `sdf_trunc` ½ (6cm→3cm)** |
+|---|---|---|---|
+| notch CD | 8.18cm | 8.18 (동일) | **8.11** |
+| notch F@5cm | 0.374 | 0.374 (동일) | **0.389** |
+| 전체 box CD | 3.78cm | 3.78 (동일) | **3.67** (box-crop 기준 전체 최고) |
+
+- **D1은 no-op 코드버그**: `render.py:100` 필터 조건 `acos(|dot|) > 100°`인데 `abs()` 탓에 acos 범위가 [0°,90°] → 100°에 절대 도달 불가. 결과 바이트 동일로 확인.
+- **D2는 전 지표 개선 + 공짜(재학습 없음) + 씬 무관** → 이후 파이프라인에 기본 반영 가치.
+
+**⑨-2. GT-free 점구름 필터 2종 — 모두 기각 (정직 기록)**
+
+| 필터 | 원리 | 결과 (dense 원본: notch 5,051 / void 1,536) |
+|---|---|---|
+| PCA planarity (`pca_filter.py`) | 로컬 PCA λ3/Σλ로 비평면 산란점 제거 | notch 4,091(-19%) / void 1,512(-1.6%) — **역효과** |
+| Free-space carving (`freespace_carve.py`) | 카메라~관측표면 ray 사이 허공점 제거 (MVS depth 사용) | notch 4,720(-7%) / **void 1,536(0개 제거)** — **무효** |
+
+기각 원인이 곧 힌트였음: void 오염이 (a) 산란이 아니고(PCA 실패) (b) depth 관측과 모순도 아님(FSC 실패) → "모든 뷰가 일관되게 표면이라 믿는 매끈한 시트" = **점 자체가 계통적으로 밀려있다**는 신호.
+
+**⑨-3. 근본원인: dense 점구름 전체가 sparse 대비 강체 이동 (ICP로 발견·해결)** ⭐
+
+dense→sparse 최근접거리 median **15cm(실측)** — 같은 월드좌표인데 표면이 안 겹침. ICP(point-to-point, with_scaling) 진단:
+- 회전≈단위행렬, scale≈0.9995, **translation ≈ 20cm(실측, 주로 +z)**, fitness 0.999
+- 해석: 전 카메라가 nadir(공통 시선축)라 MVS depth의 계통 편향(~4%)이 전역 z-이동으로 나타남 (원인 미규명 — cameras.txt focal은 982.125=focals.npy×3.75로 정확히 일치 확인, focal 탓 아님. sparse 기하가 GT와 정합함은 기존 CD 2.8cm로 입증되어 있으므로 편향은 MVS 쪽. open question)
+
+**ICP 정합 적용 후 (보편 기법: dense→sparse ICP는 GT-free 표준 정합):**
+
+| prior | notch | void |
+|---|---|---|
+| sparse raw | 1,750 | 697 |
+| dense 정합 전 | 5,051 | 1,536 |
+| **dense + ICP** | **9,961 (5.7배)** | **56 (sparse의 1/12)** |
+
+→ **"void 오염"의 정체 = 오염이 아니라 20cm 밀린 진짜 표면**. ⑦~⑧에서 관찰된 dense의 void floater 문제, PCA/FSC 실패까지 전부 이 오프셋 하나로 설명됨.
+
+**⑨-4. Anchored union 파이프라인 (GT-free)**
+
+`anchored_union.py`: dense 점은 "sparse 점 반경 r 이내"일 때만 채택(r = sparse median-NN × 8, 씬 적응형) 후 sparse와 union.
+- 정합 전 채택률 0.7% → **정합 후 48.8%** (오프셋 진단의 또다른 증거)
+- union 결과: total 349만, notch **9,731**, void 753(≈sparse 자체 몫 697+dense 56)
+
+**⑨-5. union+ICP prior GS-2M 결과 — 정량 신기록 + 단, 메시 파편화 발견 (2026-07-11)**
+
+| 지표 | 기존 최고 | unionicp_default | **unionicp_D2** |
+|---|---|---|---|
+| **full CD** | 2.72cm (retr_k1.4) | 2.36cm | **2.27cm (-17%, 신기록)** |
+| full F@5cm | — | 0.783 | **0.802** |
+| box CD | 3.67cm | 2.84cm | **2.73cm** |
+| box F@5cm(실측) | 0.517 | 0.705 | **0.728** |
+| **void 메시 점** | 107(최선) | 531 | **3 (사실상 0)** |
+
+- notch CD는 18~21cm로 커 보이나 **지표 함정**: 그림자 속 바닥면이 처음으로 복원되며 pred 점이 370→2,450개로 늘었는데, GT는 큐브 표면만 있고 바닥이 없어 올바른 표면이 "먼 점"으로 계산됨(§④ CD 부적합 결론의 재현). void≈0이 진짜 신호.
+- **문제 발견**: 가우시안 598만 과증식(prior 349만점 → 통상의 3배), TSDF 메시 30만 클러스터로 파편화 → 1-cluster 후처리가 96% 삭제(400만→17만 vertex). 살아남은 최대 클러스터가 박스+주변이라 지표는 좋지만 배경이 사라짐. 좋은 지표에 "배경 삭제" 효과 일부 포함됨을 유의.
+- 30-cluster 재추출(`tsdf_post_D2_c30.ply`): CD 2.26 유지, 배경 일부 복원(36만 vertex).
+
+**⑨-6. 파편화 대응 실험 2건 — prior 다운샘플 실패, TSDF 굵게도 실패 (2026-07-11)**
+
+가설 검증 결과 둘 다 기각:
+1. **prior 다운샘플(349만→199만, notch 5,101 유지) 재학습**: 가우시안 **629만으로 오히려 증가**(밀도가 원인 아님 확정 — densification 동역학이 원인), 전 지표 악화(full CD 2.79~2.94, void 830~1,109). 그림자 초기화만 약화시켜 순손해.
+2. **TSDF voxel 2배 굵게 재추출(D3: trunc 4×, D4: trunc 2×)**: 클러스터 9만/6.3만으로 여전히 파편화, 지표는 D2 수준(2.29~2.37), void는 D2보다 나쁨(395~471). 추출 단계 조정 한계 확인.
+
+→ **확정 최고: `unionicp_D2`** (full CD 2.27, void 3). 파편화의 남은 정공법 = **densification 자체 억제**.
+
+**⑨-7. 마지막 2건 — densify 억제 기각, clahe×MVS 프로브 기각 (2026-07-11)**
+
+3. **`densify_grad_threshold` 2배(의도적 변경) 재학습**: 가우시안 598만→382만 감소는 의도대로 됐으나 파편화 여전(55만 클러스터), 지표 전면 악화(full CD 2.79~2.86, void 919~1,091). 용량 부족으로 표면 품질만 하락 → 기각. **unionicp 원본 런이 3연속 방어** — 파편화 "수정" 시도(prior 다운샘플·TSDF 굵게·densify 억제) 전부가 오히려 악화. 파편화는 배경 한정 문제로 두고 수용.
+4. **clahe 이미지 × MVS 프로브**(GS 학습 없이 prior만 비교): clahe-MVS+ICP notch 9,817 / void 137 vs raw-MVS+ICP notch 9,961 / void 56 — **raw가 동급 커버리지 + 더 깨끗**. 계통 오프셋도 clahe에 동일 존재(|t|≈0.052). MVS 단계에서 raw가 이미 notch를 포화시켜 clahe 이득 없음 → GS 학습 생략하고 기각. (clahe의 가치는 sparse-prior-only 파이프라인의 photometric 품질에 한정)
+
+**⑨-8. 육안 판정: unionicp 전체 불합격 → double-shell 가설 → dense-우선 union 재실험 (2026-07-11)**
+
+사용자 CloudCompare 판정:
+- `raw_baseline`·`dense_D2_trunc2x`: 금간 결손 (각각 그림자 점부족 / trunc½ 트레이드오프 — 예상 내)
+- `dense_raw`: 형태 이상 (20cm 오프셋 미교정 — 예상 내, ICP 발견과 일치)
+- **`unionicp` 3종 전부: "싹다 손상"** — 파편화가 배경뿐 아니라 박스까지 침범. **정량 신기록(CD 2.27)이 시각적으로 무의미 → §④(CD≠시각품질)의 재확인. unionicp 시각 기준 불합격.**
+
+**double-shell 가설**: 순수 dense prior(dense_raw)는 메시 온전(250만 vertex 생존, 육안 "표면 좋음")했는데 union만 파편화 →
+sparse층+dense층이 ICP 잔차(~2cm)만큼 어긋난 **이중 껍질**로 같은 표면을 덮어 TSDF가 두 껍질 사이에서 간섭·분열.
+
+**대응 1 — dense-우선 union (기각)**: union 방향 반전(dense_icp 427만 + dense에서 먼 sparse 78만 = 단일 껍질 527만점) 재학습 → **여전히 파편화**(45만 클러스터, 가우시안 634만), void 1,885~2,381로 악화. **double-shell 가설 기각**.
+
+**⑨-9. 파편화의 진짜 판별 변수 = 최종 가우시안 수 (2026-07-11)**
+
+| 런 | 최종 가우시안 | 파편화 | 비고 |
+|---|---|---|---|
+| raw_baseline | 96만 | 없음 | |
+| dense_opred | 130만 | 없음 | **육안 합격("표면 좋음")** |
+| dense_raw | 168만 | 없음 | init 450만→168만 (오프셋 탓 표면 밖 점 자동 prune) |
+| dgt2x | 382만 | 파편화 | |
+| unionicp/unionds/densefirst | 598~634만 | 파편화 | ICP 정합 후엔 점들이 표면 위라 생존→과증식 |
+
+**역설 발견**: 20cm 오프셋이 사실상 "자연 prune" 역할을 했음 — 정합하면 prior가 다 살아남아 가우시안이 4~6배 불어나고, 17장 nadir 씬에서 600만 가우시안은 TSDF 파편화를 유발. **경계는 약 170만~380만 사이**.
+
+**⑨-10. 해결: denseicp(정합 prior + opacity_reduce) — 온전 메시 중 전 지표 최고 (2026-07-11)** ⭐
+
+육안 합격 레시피(dense_opred: 30k + `use_opacity_reduce`)에서 prior만 ICP 정합본(`fused_ds_icp.ply`, 450만점)으로 교체한 단일변수 실험:
+- **가우시안 101만** (opacity_reduce가 과증식 억제 — 예상 적중), **파편화 없음**(322만 중 266만 vertex 생존)
+
+| 지표 | raw_baseline | dense_opred | **denseicp_D2** |
+|---|---|---|---|
+| full CD | 2.80cm | 2.77cm | **2.70cm** |
+| box CD | 3.78cm | 3.70cm | **3.65cm** |
+| notch CD | 8.30cm | 8.18cm | **8.00cm** |
+| notch F@5cm | 0.358 | 0.374 | **0.400** |
+| void 점 | **107** | 186 | 177~188 |
+
+**온전한(비파편화) 메시 중 전 지표 최고.** 시각 검증 대기 (`4m_old_results/1_final/4m_old_denseicp_{default,D2}.ply`).
+
+**⑨-11. Retinex(MSR) 전처리 프로브 — 기각, 전처리 축 종결 (2026-07-12)**
+
+CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단조 변환인 Retinex(MSR 3-scale, σ=15/80/250)로 마지막 시도. GS 학습 없이 2단 프로브만:
+
+| 프로브 | retinex | raw 기준 | 판정 |
+|---|---|---|---|
+| ① MASt3R prior notch/void | 1,621/661 | 1,750/697 | 짐 |
+| ② MVS+ICP notch/void | 8,789/19 | 9,961/56 | notch -12%로 짐 |
+
+→ **기각 (GS 학습 생략)**. **전처리 축 완전 종결**: edge/gamma/clahe/retinex 4종 전부 기하에서 raw 패배.
+비단조 변환마저 진 것은 MASt3R·MVS가 그림자 속 가용 신호를 이미 소진하고 있다는 뜻 — **"원본이 최선"이 이 데이터셋의 결론**.
+산출물: `rgb_retinex/`(서버), `preprocess_retinex.py`, 바탕화면 `6_전처리_이미지/4m_old_prep_retinex_008.png`.
+
+**⑨-12. MASt3R 입력 해상도 스윕 — 768 승리, sparse 천장을 올린 첫 레버 (2026-07-12)** ⭐
+
+`--image_size` 512(기본)/768/1024 프로브 (retrieval-20-5, shared_intrinsics 동일):
+
+| 해상도 | total | notch | void | ATE |
+|---|---|---|---|---|
+| 512 | 129만 | 1,750 | 697 | 1.90cm |
+| **768** | **222만** | **2,945 (+68%)** | 774(비례 이하) | **1.81cm (개선)** |
+| 1024 | 32만 | 0 | 0 | **501cm (포즈 붕괴)** |
+
+- 512 학습 모델이지만 768은 허용 범위 — notch +68% & ATE 개선. **1024는 분포 밖 → 완전 붕괴** (스위트스팟 = 768)
+- 전처리 4종이 모두 실패한 것과 대조: 그림자 신호를 늘리는 건 이미지 변형이 아니라 **입력 해상도**였음
+- focal 스케일백 일반화: `build_colmap_4mold_resbase.py` (base 해상도 argv[4], 768 → ×2.5 = 968.0px)
+
+**⑨-13. RoPE 보간으로 1024 부활 + res768 전체 파이프라인 결과 (2026-07-13)**
+
+**(a) RoPE position interpolation (naver/dust3r#62)**: 1024 붕괴 원인 = CroCo ViT의 RoPE 위치인코딩이 학습범위(512) 2배 밖에서 외삽 실패(LLM context 초과와 동일 현상). `pos_embed.py`의 `t`에 `ROPE_INTERP_SCALE`(=512/입력, 환경변수, 기본 1.0) 곱하는 패치 적용:
+
+| | 768 | 1024 원본 | **1024+RoPE(0.5)** |
+|---|---|---|---|
+| notch | 2,945 | 0 | **4,733** |
+| void | **774** | 0 | 1,554 |
+| ATE | **1.81cm** | 501cm | 1.96cm |
+
+→ 붕괴 완전 해소, notch 최다. 단 **denseicp 파이프라인에서 MASt3R의 역할은 포즈+focal+ICP타깃뿐**(기하는 1920px MVS가 생성)이라 승부처는 ATE = **768이 파이프라인용 확정**. 1024+RoPE는 sparse prior를 직접 쓰는 용례에서 가치.
+
+**(b) res768 denseicp 전체 파이프라인 결과**:
+
+| 지표 | denseicp512 | **denseicp768_D2** |
+|---|---|---|
+| **notch CD** | 8.00cm | **7.25cm (역대 최고)** |
+| **notch F@5cm** | 0.400 | **0.440 (역대 최고)** |
+| box F@1cm | 0.257 | **0.315** |
+| box CD | 3.65cm | 3.60cm |
+| void | 177~188 | 186~241 |
+| full CD | **2.70cm** | 3.35cm (후퇴) |
+| 가우시안 | 101만 | 83만 (파편화 없음 ✅) |
+
+- 타깃(그림자 요철)은 768이 전 지표 갱신. full CD 후퇴 원인 추정: 768 런의 MVS 계통 오프셋이 더 컸음(ICP fitness 0.999→0.951, |t|≈0.31 colmap) → 배경 정합 잔차.
+- **육안 판정 대기**: `1_final/4m_old_denseicp768_{default,D2}.ply` vs `4m_old_denseicp_{default,D2}.ply`(512).
+
+**최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
+핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
+
+**바탕화면 산출물**: `4m_old_unionicp_default.ply`, `4m_old_unionicp_D2.ply`, `4m_old_unionicp_D2_c30.ply` (+기존 `4m_old_dense_D2_trunc2x.ply`).
+
+**확립된 보편 파이프라인(요약)**: MASt3R sparse → COLMAP dense MVS(`__all__` cfg, depth범위 자동, consistency graph on, min_num_pixels=1) → **dense→sparse ICP 정합** → **anchored union**(r=8×median-NN) → GS-2M(동일 파라미터) → TSDF(D2: sdf_trunc=2×voxel). GT 사용 단계 없음.
+
+---
+
+
+## GS-2M 원본 철학 검증: Prior 있는 버전 vs 없는 버전 비교 (2026-07-14~19)
 
 ### ⓐ 배경: GS-2M 논문 확인 후 설계 철학 재정의
 
@@ -449,343 +1352,251 @@ CloudCompare 육안 비교에서 native prior가 dense+ICP보다 오히려 깔�
 
 ---
 
-## 9. 4m_old 박스 복원 버그 수정 + 그림자 전처리 실험 (2026-07-10)
-
-### ⓪ 배경: 7/5 이후 박스 소실 버그 진단·수정
-
-4m_old(17장 시뮬)에서 6/29에 성공했던 박스 복원이 7/5 이후 실행에서 **박스가 안 보이는** 문제 발생. 원인 2가지 확정:
-
-| # | 버그 | 실패값 → 수정값 | 영향 |
-|---|---|---|---|
-| 1 (주) | **COLMAP focal 스케일백 누락** | 260.4px → **979.7px** (×1920/512) | 512px 기준 focal을 1920px에 그대로 사용 → FOV 89°가 아닌 150° 어안 → 기하 뭉개짐 → TSDF 150만~420만 조각 파편화 → 1-cluster 후처리가 박스 삭제. PSNR은 31dB 나와서(가우시안 2배 보상) 지표만 보면 정상처럼 보이는 함정 |
-| 2 (부) | **`--shared_intrinsics` 누락** | 프레임별 focal 제각각 → 공유 | ATE 8.90cm → 1.86cm |
-
-> 주의: MASt3R는 실행마다 좌표계가 임의로 잡히므로 **poses.npy 값 자체가 달라지는 건 정상**(내부일관성 ATE만 보면 됨). prior PLY도 정상이었음.
-> 1번(swin5_raw)만 살아남았던 건 raw여서가 아니라 **버그 발생 전 6/29에 학습**된 산출물이었기 때문.
-
-### ① 수정 후 4-combo 결과 (retrieval vs swin × raw vs k1.4 필터)
-
-focal 979.7 + shared_intrinsics 적용, 4개 전부 박스 복원 성공.
-
-| 조합 | 전체 CD | ATE |
-|---|---|---|
-| swin_raw | 3.70cm | 1.86cm |
-| swin_k1.4 | 3.73cm | 1.86cm |
-| retr_raw | 2.80cm | 1.90cm |
-| **retr_k1.4** | **2.72cm** | 1.90cm |
-
-→ **retrieval-20-5가 swin-5보다 ~25% 우수**, k1.4 필터는 retrieval에서만 소폭 개선. 기존 "retrieval + k1.4" 채택 방향이 올바른 focal에서도 유효함 재확인.
-
-### ② 그림자 요철 개선 — 이미지 전처리 3종 실험
-
-문제: ㄷ자 오목부(요철) **그림자 영역에 prior 점이 희박**해 GS-2M이 벽을 못 세움.
-전처리 3종을 retrieval-20-5(raw)로 각각 MASt3R→GS-2M 학습. baseline = 무전처리 retr_raw.
-
-| 변형 | 출처 | 방법 |
-|---|---|---|
-| edge | 내(사용자) 아이디어 | FFT 하이패스(엣지만) |
-| gamma | Claude 추천 | γ=0.6 그림자 밝히기 |
-| clahe | Claude(GS 표준 전처리) | LAB-L에 CLAHE(clip2.0, 타일8×8) |
-
-### ③ 핵심 발견: 측정 범위별로 승자가 완전히 다름
-
-| 변형 | 전체 씬 CD | 박스(5cm) CD | 요철 CD | 요철 pred점 | 요철 정밀도(pred→gt) | 요철 void점(적을수록↑) |
-|---|---|---|---|---|---|---|
-| baseline | **2.80** | **1.76** | 8.30 | 370 | 8.87cm | 107 |
-| gamma | 2.76 | 2.02 | 9.19 | 376 | 8.67cm | 114 |
-| clahe | 4.08 | 2.34 | 6.46 | 514 | 7.15cm | 117 |
-| edge | 11.01 | 2.36 | **5.65** | **648** | **4.78cm** | **63** |
-
-- **밝은 박스 표면**: baseline 최고 (전처리는 노이즈만 추가)
-- **그림자 요철(점-거리 지표)**: edge > clahe >> baseline > gamma
-- edge는 **전역 최악(11cm, 배경 쓰레기 웹)·요철 국소 최고** → 그대로는 못 씀
-
-### ④ 결정적: CD가 이 데이터셋의 시각품질 지표로 부적합
-
-육안(CloudCompare)으로 본 오목부 형상 충실도:
-- **clahe = 최고**: 외곽선은 거칠지만 오목부가 또렷이 열려 벽·틈이 명확 (ㄷ자 가장 정확)
-- **edge**: 표면 매끈하나 **안쪽 코너를 둥글려 오목부를 메꿈**(형상 뭉개짐) — "그림자 연결돼 보임"의 정체
-- **gamma**: 쪼그라들고 녹은 형태 (최악)
-
-→ **CD/정밀도는 "매끈하지만 코너 뭉개짐(edge)"을 편애**하고 "거칠지만 형상정확(clahe)"에 벌점. **위상 충실도를 못 잡음.** README 1차 기준이 "시각적 품질"이므로 **clahe가 실질 승자**(사용자 첫 직감과 일치).
-
-정리:
-- 형태 충실도(육안, 오목부): **clahe > edge > gamma**
-- 표면 매끄러움: edge > gamma > clahe
-- 평균 CD: baseline > gamma > clahe > edge (형상충실도와 역상관 → 신뢰 부적합)
-
-### ⑤ 산출물 위치
-
-- 서버: `real_test_4m_old__colmap_retr_{edge,gamma,clahe}_raw__gs2m/` (메시), `real_test_4m_old__mast3r_retr_{edge,gamma,clahe}/` (prior)
-- 평가 스크립트: `eval_mesh_boxcrop.py`(박스 타이트), `eval_mesh_notch.py`(요철), `eval_notch_precision.py`(정밀도/재현율/void 분리)
-- 전처리: `preprocess_3variants.py` / 파이프라인: `run_3variants_full.sh`
-- 윈도우 바탕화면: `4m_old_prep_mesh_{edge,gamma,clahe}.ply`, `4m_old_prep_prior_*.ply`
-
-### ⑥ 다음 스텝 (clahe 후속, 미실행)
-
-clahe 강점(국소대비→그림자 형상) 유지 + 약점(거친면·배경쓰레기) 제거:
-1. **clahe + bilateral 디노이즈**: 엣지보존하며 표면 노이즈만 제거 (최우선)
-2. **clahe_soft**: clip1.5 + 타일16 + γ0.8 (완만한 그림자회복)
-3. **clahe 마스킹**: 그림자 픽셀에만 적용, 밝은면·배경 원본 (배경오염 차단)
-4. **clahe prior + k1.4 필터**: 이미지 재처리 없이 배경 쓰레기 정리 (제일 쌈, GS-2M 1회)
-
-### ⑦ 요소별 순차 실험 — confidence 완화 기각, Dense MVS 부분 성공 (2026-07-10)
-
-**동기**: "raw에서 할 수 있는 최대한의 전처리를 시도 → 유의미한 결과 앙상블" 방침 확정.
-축 분류: ①이미지 전처리(위 ②에서 완료) ②MASt3R confidence 완화 ③Dense MVS(점 채우기) ④GS 단계 내부 튜닝 ⑤평가지표.
-
-**② confidence 완화 — 기각.**
-`min_conf_thr` 1.5→1.0→0.5로 완화(매칭 캐시 재사용, 재매칭 없음), notch bbox 내 점 개수 측정:
-
-| min_conf_thr | notch 점 | void 점 |
-|---|---|---|
-| 1.5(기존) | 1,750 | 697 |
-| 1.0 | 1,750 | 697 |
-| 0.5 | 1,747 | 698 |
-
-완화로 늘어난 점(1.3만~2.3만)은 전량 notch 바깥(배경)에 낙하 → **그림자는 confidence 문제가 아니라 애초에 매칭 신호 자체가 없음**. GS 재학습 없이 폐기.
-
-같은 방식으로 ①(edge/gamma/clahe) prior도 재검증: notch 점 raw 1,750 > gamma 1,610 > clahe 1,599 > edge 762.
-**raw가 이미 notch 점 최다** — clahe의 시각적 우위는 prior 커버리지가 아니라 GS 단계 photometric 최적화 효과로 재해석.
-
-**③ Dense MVS(COLMAP patch_match_stereo + stereo_fusion) — 부분 성공.**
-raw prior의 sparse COLMAP 모델(포즈 고정) 위에 dense stereo를 얹어 점을 채움. 디버깅 중 숨은 기본값 문제 3개 발견:
-- `depth_min/max` 미지정 시 실패 → 카메라 좌표계 깊이 분포(1~99%ile)로 수동 계산해 지정
-- `write_consistency_graph`(기본 `0`) 꺼져있으면 fusion이 무조건 0점 반환
-- `StereoFusion.min_num_pixels`(기본 5)가 17장 sparse-view(넓은 베이스라인)엔 과함 → 2도 0점, **1로 낮춰야** 함(어차피 cross-view consensus는 patch_match 단계의 `filter_min_num_consistent=2`에서 이미 적용됨, fusion에서 또 요구하면 이중 필터링)
-
-결과(voxel 다운샘플 후 147만점 vs 450만점 비교):
-
-| | notch 점 | void 점 | notch/void |
-|---|---|---|---|
-| sparse raw(기존) | 1,750 | 697 | 2.51 |
-| dense(voxel_mult 6.0, 147만점) | 1,611 | 481 | 3.35 — but notch **절대량 기존보다 감소** |
-| **dense(voxel_mult 2.8, 450만점)** | **5,051** | 1,536 | 3.29 |
-| dense(무압축, 1030만점) | 9,001 | 2,665 | 3.38 |
-
-voxel 다운샘플은 공간적으로 균일해서 세게 걸면 notch 이득이 사라짐 → 450만점 버전 채택, `colmap_dense_raw` 빌드 후 GS-2M 학습(**raw baseline과 동일 파라미터**: `--iterations 30000`, 추가 플래그 없음).
-
-**최종 메시 지표 (raw baseline vs dense_raw, 동일 crop):**
-
-| 지표 | raw baseline | dense_raw |
-|---|---|---|
-| notch mesh 점 수 | 370 | 587 (+59%) |
-| notch CD | 8.30cm | 8.45cm |
-| notch F@5cm | 0.358 | 0.367 |
-| notch 정밀도(pred→gt) | 8.87cm | 9.42cm |
-| notch 재현율(gt→pred) | 7.73cm | 7.48cm |
-| notch spurious>5cm | 62.4% | 64.2% |
-| **void(열린 입) floater 점** | 107 | **193 (+80%)** |
-| 전체 box CD | 3.78cm | 3.77cm |
-
-**해석**: notch 점은 늘었지만(+59%) void 가짜 floater도 비슷하거나 더 늘어(+80%) 지표상 우열 불명확 — dense fusion이 그림자 표면과 빈 공간 노이즈를 구분 없이 같이 채웠기 때문(전역 union의 한계).
-육안 확인(CloudCompare, 사용자 보고): **"표면은 dense가 더 좋게 나옴, 다만 요철 부분 오염은 여전함"** — 정량 지표(void floater 증가)와 일치하는 소견.
-
-**다음 후보**:
-1. **외과적 union**: dense 점을 notch bbox로만 crop + 로컬 outlier 제거 → raw baseline prior(전역 검증됨)에 patch로만 삽입, 나머지 씬은 오염 없이 유지 (미실행)
-2. **clahe 이미지로 Dense MVS 재시도**: clahe가 대비를 살려 매칭 신호가 원본보다 강할 수 있어 floater가 raw보다 적을 가능성 (미실행)
-3. ④(GS 내부: densify 완화, depth/normal prior, opacity entropy) — 아래 실행함
-
-**산출물**: 서버 `real_test_4m_old__colmap_dense_raw__gs2m/`, dense 점구름 `real_test_4m_old__colmapfix_retr_raw/dense/fused_ds.ply`(450만점). 윈도우 바탕화면 `4m_old_dense_raw.ply`, `4m_old_raw_baseline.ply`.
-
-### ⑧ GS-2M 내부 floater 억제 옵션(`use_opacity_reduce`) 실험 — 효과는 있으나 미미 (2026-07-10)
-
-**배경**: 외부 논문 조사(DN-Splatter/2D-SuGaR, adaptive densification+planar prior, GSurf/StableGS opacity entropy, G4Splat/Gaussian Scenes 생성모델)로 ④(GS 내부 튜닝) 방향을 구체화하려던 중,
-GS-2M 코드 확인 결과 **depth-normal 일관성 손실은 이미 기본값으로 전 실험(raw/dense 포함)에 적용 중이었음**을 발견(`lambda_depth_normal=0.03`, `lambda_multi_view=1.0`, `geometry_from_iter=5000` — 이미 5000~30000 iter 구간 내내 활성).
-반면 **`use_opacity_reduce`(500 iter마다 opacity를 0.8로 캡 — "Periodically reduce opacity to remove floaters" 주석)는 기본값 `False`로, 지금까지 모든 런에서 꺼진 채였음** → dense MVS의 void floater 문제(②참고, +80%)에 정확히 대응하는 미사용 레버 발견.
-
-**실험**: `colmap_dense_raw`(dense MVS prior, ⑦ 참고) 소스에 `--use_opacity_reduce` 플래그 하나만 추가, 나머지 파라미터(`--iterations 30000`) 동일 유지하고 재학습.
-
-| 지표 | raw baseline | dense_raw | **dense_opred** |
-|---|---|---|---|
-| notch mesh 점 | 370 | 587 | 562 |
-| notch CD | 8.30cm | 8.45cm | **8.18cm**(최고) |
-| notch F@5cm | 0.358 | 0.367 | **0.374**(최고) |
-| notch spurious>5cm | 62.4% | 64.2% | 62.1%(최소) |
-| **void floater 점** | **107** | 193 | 186 |
-| 전체 box CD | 3.78cm | 3.77cm | 3.78cm |
-
-**결론**: notch 지표 전반이 소폭 개선되고 void floater도 193→186로 약간 줄었으나, **raw baseline(107)에는 한참 못 미침** — 효과는 실재하나 결정적이지 않음.
-원인 추정: opacity 상한 캡은 "순한 감쇠"라 이미 자리잡은 floater를 확실히 제거하지 못함(GSurf/StableGS의 진짜 entropy 정규화 항보다 약한 메커니즘). 하이퍼파라미터(`opacity_reduce_interval` 축소, cap 하향)로 더 튜닝하는 것보다, **다음 후보 1번(외과적 union)이 근본적으로 더 확실한 해법**으로 판단 — void 영역에 dense 점 자체가 안 들어가게 원천 차단.
-
-**산출물**: 서버 `real_test_4m_old__colmap_dense_raw_opred__gs2m/`.
-
-### ⑨ 보편(GT-free) 기준 전환 + **근본원인 발견: dense MVS 점구름 20cm 계통 오프셋** (2026-07-11)
-
-**방침 전환**: 사용자 지시로 "이 데이터셋 전용(GT bbox 수동 crop)" 방법 배제, **어느 씬에나 적용 가능한 보편 기준**만 사용. GT는 검증(notch/void 측정)에만 사용.
-
-**⑨-1. TSDF 재추출 실험 (D1/D2, 재학습 없음, 씬 무관 파라미터)**
-
-| 지표 | dense_opred 기준 | D1 `--filter_depth` | **D2 `sdf_trunc` ½ (6cm→3cm)** |
-|---|---|---|---|
-| notch CD | 8.18cm | 8.18 (동일) | **8.11** |
-| notch F@5cm | 0.374 | 0.374 (동일) | **0.389** |
-| 전체 box CD | 3.78cm | 3.78 (동일) | **3.67** (box-crop 기준 전체 최고) |
-
-- **D1은 no-op 코드버그**: `render.py:100` 필터 조건 `acos(|dot|) > 100°`인데 `abs()` 탓에 acos 범위가 [0°,90°] → 100°에 절대 도달 불가. 결과 바이트 동일로 확인.
-- **D2는 전 지표 개선 + 공짜(재학습 없음) + 씬 무관** → 이후 파이프라인에 기본 반영 가치.
-
-**⑨-2. GT-free 점구름 필터 2종 — 모두 기각 (정직 기록)**
-
-| 필터 | 원리 | 결과 (dense 원본: notch 5,051 / void 1,536) |
-|---|---|---|
-| PCA planarity (`pca_filter.py`) | 로컬 PCA λ3/Σλ로 비평면 산란점 제거 | notch 4,091(-19%) / void 1,512(-1.6%) — **역효과** |
-| Free-space carving (`freespace_carve.py`) | 카메라~관측표면 ray 사이 허공점 제거 (MVS depth 사용) | notch 4,720(-7%) / **void 1,536(0개 제거)** — **무효** |
-
-기각 원인이 곧 힌트였음: void 오염이 (a) 산란이 아니고(PCA 실패) (b) depth 관측과 모순도 아님(FSC 실패) → "모든 뷰가 일관되게 표면이라 믿는 매끈한 시트" = **점 자체가 계통적으로 밀려있다**는 신호.
-
-**⑨-3. 근본원인: dense 점구름 전체가 sparse 대비 강체 이동 (ICP로 발견·해결)** ⭐
-
-dense→sparse 최근접거리 median **15cm(실측)** — 같은 월드좌표인데 표면이 안 겹침. ICP(point-to-point, with_scaling) 진단:
-- 회전≈단위행렬, scale≈0.9995, **translation ≈ 20cm(실측, 주로 +z)**, fitness 0.999
-- 해석: 전 카메라가 nadir(공통 시선축)라 MVS depth의 계통 편향(~4%)이 전역 z-이동으로 나타남 (원인 미규명 — cameras.txt focal은 982.125=focals.npy×3.75로 정확히 일치 확인, focal 탓 아님. sparse 기하가 GT와 정합함은 기존 CD 2.8cm로 입증되어 있으므로 편향은 MVS 쪽. open question)
-
-**ICP 정합 적용 후 (보편 기법: dense→sparse ICP는 GT-free 표준 정합):**
-
-| prior | notch | void |
-|---|---|---|
-| sparse raw | 1,750 | 697 |
-| dense 정합 전 | 5,051 | 1,536 |
-| **dense + ICP** | **9,961 (5.7배)** | **56 (sparse의 1/12)** |
-
-→ **"void 오염"의 정체 = 오염이 아니라 20cm 밀린 진짜 표면**. ⑦~⑧에서 관찰된 dense의 void floater 문제, PCA/FSC 실패까지 전부 이 오프셋 하나로 설명됨.
-
-**⑨-4. Anchored union 파이프라인 (GT-free)**
-
-`anchored_union.py`: dense 점은 "sparse 점 반경 r 이내"일 때만 채택(r = sparse median-NN × 8, 씬 적응형) 후 sparse와 union.
-- 정합 전 채택률 0.7% → **정합 후 48.8%** (오프셋 진단의 또다른 증거)
-- union 결과: total 349만, notch **9,731**, void 753(≈sparse 자체 몫 697+dense 56)
-
-**⑨-5. union+ICP prior GS-2M 결과 — 정량 신기록 + 단, 메시 파편화 발견 (2026-07-11)**
-
-| 지표 | 기존 최고 | unionicp_default | **unionicp_D2** |
-|---|---|---|---|
-| **full CD** | 2.72cm (retr_k1.4) | 2.36cm | **2.27cm (-17%, 신기록)** |
-| full F@5cm | — | 0.783 | **0.802** |
-| box CD | 3.67cm | 2.84cm | **2.73cm** |
-| box F@5cm(실측) | 0.517 | 0.705 | **0.728** |
-| **void 메시 점** | 107(최선) | 531 | **3 (사실상 0)** |
-
-- notch CD는 18~21cm로 커 보이나 **지표 함정**: 그림자 속 바닥면이 처음으로 복원되며 pred 점이 370→2,450개로 늘었는데, GT는 큐브 표면만 있고 바닥이 없어 올바른 표면이 "먼 점"으로 계산됨(§④ CD 부적합 결론의 재현). void≈0이 진짜 신호.
-- **문제 발견**: 가우시안 598만 과증식(prior 349만점 → 통상의 3배), TSDF 메시 30만 클러스터로 파편화 → 1-cluster 후처리가 96% 삭제(400만→17만 vertex). 살아남은 최대 클러스터가 박스+주변이라 지표는 좋지만 배경이 사라짐. 좋은 지표에 "배경 삭제" 효과 일부 포함됨을 유의.
-- 30-cluster 재추출(`tsdf_post_D2_c30.ply`): CD 2.26 유지, 배경 일부 복원(36만 vertex).
-
-**⑨-6. 파편화 대응 실험 2건 — prior 다운샘플 실패, TSDF 굵게도 실패 (2026-07-11)**
-
-가설 검증 결과 둘 다 기각:
-1. **prior 다운샘플(349만→199만, notch 5,101 유지) 재학습**: 가우시안 **629만으로 오히려 증가**(밀도가 원인 아님 확정 — densification 동역학이 원인), 전 지표 악화(full CD 2.79~2.94, void 830~1,109). 그림자 초기화만 약화시켜 순손해.
-2. **TSDF voxel 2배 굵게 재추출(D3: trunc 4×, D4: trunc 2×)**: 클러스터 9만/6.3만으로 여전히 파편화, 지표는 D2 수준(2.29~2.37), void는 D2보다 나쁨(395~471). 추출 단계 조정 한계 확인.
-
-→ **확정 최고: `unionicp_D2`** (full CD 2.27, void 3). 파편화의 남은 정공법 = **densification 자체 억제**.
-
-**⑨-7. 마지막 2건 — densify 억제 기각, clahe×MVS 프로브 기각 (2026-07-11)**
-
-3. **`densify_grad_threshold` 2배(의도적 변경) 재학습**: 가우시안 598만→382만 감소는 의도대로 됐으나 파편화 여전(55만 클러스터), 지표 전면 악화(full CD 2.79~2.86, void 919~1,091). 용량 부족으로 표면 품질만 하락 → 기각. **unionicp 원본 런이 3연속 방어** — 파편화 "수정" 시도(prior 다운샘플·TSDF 굵게·densify 억제) 전부가 오히려 악화. 파편화는 배경 한정 문제로 두고 수용.
-4. **clahe 이미지 × MVS 프로브**(GS 학습 없이 prior만 비교): clahe-MVS+ICP notch 9,817 / void 137 vs raw-MVS+ICP notch 9,961 / void 56 — **raw가 동급 커버리지 + 더 깨끗**. 계통 오프셋도 clahe에 동일 존재(|t|≈0.052). MVS 단계에서 raw가 이미 notch를 포화시켜 clahe 이득 없음 → GS 학습 생략하고 기각. (clahe의 가치는 sparse-prior-only 파이프라인의 photometric 품질에 한정)
-
-**⑨-8. 육안 판정: unionicp 전체 불합격 → double-shell 가설 → dense-우선 union 재실험 (2026-07-11)**
-
-사용자 CloudCompare 판정:
-- `raw_baseline`·`dense_D2_trunc2x`: 금간 결손 (각각 그림자 점부족 / trunc½ 트레이드오프 — 예상 내)
-- `dense_raw`: 형태 이상 (20cm 오프셋 미교정 — 예상 내, ICP 발견과 일치)
-- **`unionicp` 3종 전부: "싹다 손상"** — 파편화가 배경뿐 아니라 박스까지 침범. **정량 신기록(CD 2.27)이 시각적으로 무의미 → §④(CD≠시각품질)의 재확인. unionicp 시각 기준 불합격.**
-
-**double-shell 가설**: 순수 dense prior(dense_raw)는 메시 온전(250만 vertex 생존, 육안 "표면 좋음")했는데 union만 파편화 →
-sparse층+dense층이 ICP 잔차(~2cm)만큼 어긋난 **이중 껍질**로 같은 표면을 덮어 TSDF가 두 껍질 사이에서 간섭·분열.
-
-**대응 1 — dense-우선 union (기각)**: union 방향 반전(dense_icp 427만 + dense에서 먼 sparse 78만 = 단일 껍질 527만점) 재학습 → **여전히 파편화**(45만 클러스터, 가우시안 634만), void 1,885~2,381로 악화. **double-shell 가설 기각**.
-
-**⑨-9. 파편화의 진짜 판별 변수 = 최종 가우시안 수 (2026-07-11)**
-
-| 런 | 최종 가우시안 | 파편화 | 비고 |
-|---|---|---|---|
-| raw_baseline | 96만 | 없음 | |
-| dense_opred | 130만 | 없음 | **육안 합격("표면 좋음")** |
-| dense_raw | 168만 | 없음 | init 450만→168만 (오프셋 탓 표면 밖 점 자동 prune) |
-| dgt2x | 382만 | 파편화 | |
-| unionicp/unionds/densefirst | 598~634만 | 파편화 | ICP 정합 후엔 점들이 표면 위라 생존→과증식 |
-
-**역설 발견**: 20cm 오프셋이 사실상 "자연 prune" 역할을 했음 — 정합하면 prior가 다 살아남아 가우시안이 4~6배 불어나고, 17장 nadir 씬에서 600만 가우시안은 TSDF 파편화를 유발. **경계는 약 170만~380만 사이**.
-
-**⑨-10. 해결: denseicp(정합 prior + opacity_reduce) — 온전 메시 중 전 지표 최고 (2026-07-11)** ⭐
-
-육안 합격 레시피(dense_opred: 30k + `use_opacity_reduce`)에서 prior만 ICP 정합본(`fused_ds_icp.ply`, 450만점)으로 교체한 단일변수 실험:
-- **가우시안 101만** (opacity_reduce가 과증식 억제 — 예상 적중), **파편화 없음**(322만 중 266만 vertex 생존)
-
-| 지표 | raw_baseline | dense_opred | **denseicp_D2** |
-|---|---|---|---|
-| full CD | 2.80cm | 2.77cm | **2.70cm** |
-| box CD | 3.78cm | 3.70cm | **3.65cm** |
-| notch CD | 8.30cm | 8.18cm | **8.00cm** |
-| notch F@5cm | 0.358 | 0.374 | **0.400** |
-| void 점 | **107** | 186 | 177~188 |
-
-**온전한(비파편화) 메시 중 전 지표 최고.** 시각 검증 대기 (`4m_old_results/1_final/4m_old_denseicp_{default,D2}.ply`).
-
-**⑨-11. Retinex(MSR) 전처리 프로브 — 기각, 전처리 축 종결 (2026-07-12)**
-
-CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단조 변환인 Retinex(MSR 3-scale, σ=15/80/250)로 마지막 시도. GS 학습 없이 2단 프로브만:
-
-| 프로브 | retinex | raw 기준 | 판정 |
-|---|---|---|---|
-| ① MASt3R prior notch/void | 1,621/661 | 1,750/697 | 짐 |
-| ② MVS+ICP notch/void | 8,789/19 | 9,961/56 | notch -12%로 짐 |
-
-→ **기각 (GS 학습 생략)**. **전처리 축 완전 종결**: edge/gamma/clahe/retinex 4종 전부 기하에서 raw 패배.
-비단조 변환마저 진 것은 MASt3R·MVS가 그림자 속 가용 신호를 이미 소진하고 있다는 뜻 — **"원본이 최선"이 이 데이터셋의 결론**.
-산출물: `rgb_retinex/`(서버), `preprocess_retinex.py`, 바탕화면 `6_전처리_이미지/4m_old_prep_retinex_008.png`.
-
-**⑨-12. MASt3R 입력 해상도 스윕 — 768 승리, sparse 천장을 올린 첫 레버 (2026-07-12)** ⭐
-
-`--image_size` 512(기본)/768/1024 프로브 (retrieval-20-5, shared_intrinsics 동일):
-
-| 해상도 | total | notch | void | ATE |
-|---|---|---|---|---|
-| 512 | 129만 | 1,750 | 697 | 1.90cm |
-| **768** | **222만** | **2,945 (+68%)** | 774(비례 이하) | **1.81cm (개선)** |
-| 1024 | 32만 | 0 | 0 | **501cm (포즈 붕괴)** |
-
-- 512 학습 모델이지만 768은 허용 범위 — notch +68% & ATE 개선. **1024는 분포 밖 → 완전 붕괴** (스위트스팟 = 768)
-- 전처리 4종이 모두 실패한 것과 대조: 그림자 신호를 늘리는 건 이미지 변형이 아니라 **입력 해상도**였음
-- focal 스케일백 일반화: `build_colmap_4mold_resbase.py` (base 해상도 argv[4], 768 → ×2.5 = 968.0px)
-
-**⑨-13. RoPE 보간으로 1024 부활 + res768 전체 파이프라인 결과 (2026-07-13)**
-
-**(a) RoPE position interpolation (naver/dust3r#62)**: 1024 붕괴 원인 = CroCo ViT의 RoPE 위치인코딩이 학습범위(512) 2배 밖에서 외삽 실패(LLM context 초과와 동일 현상). `pos_embed.py`의 `t`에 `ROPE_INTERP_SCALE`(=512/입력, 환경변수, 기본 1.0) 곱하는 패치 적용:
-
-| | 768 | 1024 원본 | **1024+RoPE(0.5)** |
-|---|---|---|---|
-| notch | 2,945 | 0 | **4,733** |
-| void | **774** | 0 | 1,554 |
-| ATE | **1.81cm** | 501cm | 1.96cm |
-
-→ 붕괴 완전 해소, notch 최다. 단 **denseicp 파이프라인에서 MASt3R의 역할은 포즈+focal+ICP타깃뿐**(기하는 1920px MVS가 생성)이라 승부처는 ATE = **768이 파이프라인용 확정**. 1024+RoPE는 sparse prior를 직접 쓰는 용례에서 가치.
-
-**(b) res768 denseicp 전체 파이프라인 결과**:
-
-| 지표 | denseicp512 | **denseicp768_D2** |
-|---|---|---|
-| **notch CD** | 8.00cm | **7.25cm (역대 최고)** |
-| **notch F@5cm** | 0.400 | **0.440 (역대 최고)** |
-| box F@1cm | 0.257 | **0.315** |
-| box CD | 3.65cm | 3.60cm |
-| void | 177~188 | 186~241 |
-| full CD | **2.70cm** | 3.35cm (후퇴) |
-| 가우시안 | 101만 | 83만 (파편화 없음 ✅) |
-
-- 타깃(그림자 요철)은 768이 전 지표 갱신. full CD 후퇴 원인 추정: 768 런의 MVS 계통 오프셋이 더 컸음(ICP fitness 0.999→0.951, |t|≈0.31 colmap) → 배경 정합 잔차.
-- **육안 판정 대기**: `1_final/4m_old_denseicp768_{default,D2}.ply` vs `4m_old_denseicp_{default,D2}.ply`(512).
-
-**최종 파이프라인(보편, GT-free)**: raw 이미지 → MASt3R sparse(retrieval-20-5, shared_intrinsics) → COLMAP dense MVS(`__all__`, depth범위 자동, consistency graph, min_num_pixels=1) → **dense→sparse ICP 정합** → voxel 다운샘플(450만) → GS-2M 30k + **`--use_opacity_reduce`** → TSDF(D2: sdf_trunc=2×voxel).
-핵심 교훈 3가지: ① MVS 점구름은 sparse와 계통 오프셋이 있을 수 있다(반드시 ICP) ② 정합 후엔 prior가 다 살아남아 가우시안이 과증식한다(opacity_reduce 필수) ③ sparse+dense 혼합 union은 이득이 없었다(순수 dense가 더 깨끗).
-
-**바탕화면 산출물**: `4m_old_unionicp_default.ply`, `4m_old_unionicp_D2.ply`, `4m_old_unionicp_D2_c30.ply` (+기존 `4m_old_dense_D2_trunc2x.ply`).
-
-**확립된 보편 파이프라인(요약)**: MASt3R sparse → COLMAP dense MVS(`__all__` cfg, depth범위 자동, consistency graph on, min_num_pixels=1) → **dense→sparse ICP 정합** → **anchored union**(r=8×median-NN) → GS-2M(동일 파라미터) → TSDF(D2: sdf_trunc=2×voxel). GT 사용 단계 없음.
 
 ---
 
-## 7. 실제 드론 데이터 복원 (2026-06-29)
+# PART B. 실제 드론 데이터
+
+## 실제 드론 촬영 데이터 (2026-06-24 추가)
+
+- **출처**: 실제 드론으로 촬영한 영상 프레임 (시뮬레이션 아님)
+- **Google Drive**: https://drive.google.com/file/d/1y_HwAsE0eA3lCimyzNVqh3dLiGPdrs-e/view?usp=sharing
+- **파일**: ZIP (197MB), 총 1,656장 JPG
+- **로컬**: `C:\Users\sdh97\Desktop\drone_images\{3m_1,5m_1,7m_1}\`
+
+| 폴더 | 장수 | 설명 |
+|---|---|---|
+| `3m_1` | 547장 | 고도 3m 촬영 |
+| `5m_1` | 544장 | 고도 5m 촬영 |
+| `7m_1` | 565장 | 고도 7m 촬영 |
+
+- **비고**: 기존 STATUS.md의 `real_test` 항목에 "시뮬레이션"으로 잘못 기재된 부분 있음. real_test 34장도 실제 드론 촬영 데이터임.
+
+### 드론 영상 MASt3R-SfM 결과 (2026-06-24 완료)
+
+- **서버**: sysai3, 환경 `venv-mast3r`, 스크립트 `~/Desktop/run_drone_mast3r.sh`
+- **설정**: scene_graph=swin winsize=5, 10프레임마다 1장 샘플링 (~55장/폴더), shared_intrinsics
+
+| 폴더 | 입력 장수 | 출력 | 경로 |
+|---|---|---|---|
+| `3m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/3m_1/` |
+| `5m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/5m_1/` |
+| `7m_1` | 57장 | poses.npy (57,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/7m_1/` |
+
+---
+
+
+## GS-2M (Eurographics 2026) 학습 + 평가 (2026-06-24)
+
+### 학습 정보
+
+- **입력**: `real_test` 데이터 (34장, 1920×1080), COLMAP 초기화
+- **모델**: GS-2M — material-aware Gaussian Splatting + TSDF mesh extraction
+- **환경**: `conda gs2m` (GCC11, CUDA11.8, NumPy<2)
+- **출력 디렉토리**: `C:\Users\sdh97\Desktop\3d_results\real_test\gs2m_output\`
+
+| 항목 | 값 |
+|---|---|
+| 학습 iter | 30,000 |
+| L1 loss (최종) | 0.0199 |
+| PSNR (최종) | 31.21 dB |
+| TSDF 메시 | `train/ours_30000/mesh/tsdf_post.ply` ✅ |
+
+### 메시 품질 평가 (재평가, Umeyama 카메라 포즈 정렬 기반)
+
+> **평가 방법**: Umeyama 변환 (카메라 포즈 기반, scale=3.89×, ATE=2.3cm) → GT 큐브를 COLMAP 공간으로 역변환 → COLMAP 공간에서 직접 CD/F-score 계산
+>
+> **GT**: UE5 Cube8~12.ply (5개 큐브, X=1.235~1.587 COLMAP units)
+>
+> **참고**: 이전 평가(21-24cm)는 스크립트 미확인으로 재현 불가. 아래는 동일 방법으로 전 방법 재평가한 공정 비교임.
+
+| 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 비고 |
+|---|---|---|---|---|---|
+| AGS baseline | **25.41** | 0.019 | 0.057 | **0.127** | ✅ CD 최저 |
+| **GS-2M (ours)** | **27.79** | 0.004 | 0.029 | 0.057 | ← **NEW** |
+| MILo SOR2 | 30.72 | 0.003 | 0.013 | 0.024 | — |
+| MILo baseline | 37.20 | 0.003 | 0.010 | 0.018 | — |
+| 2DGS | 37.25 | 0.003 | 0.019 | 0.036 | — |
+
+> **해석**: CD 기준으로 GS-2M은 MILo/2DGS 대비 25-27% 개선. 5개 큐브 전체 씬에서 CD가 높은 것은 전체 씬 메시를 GT 소형 큐브와 비교하기 때문 (대부분의 메시 포인트가 큐브 표면과 거리가 멈).
+
+### 스크립트
+
+- **학습**: `/tmp/GS-2M/train.py` — `source ~/miniconda3/bin/activate gs2m && export CC=~/miniconda3/envs/gs2m/bin/gcc ...`
+- **메시 추출**: `/tmp/GS-2M/render.py --extract_mesh --skip_test`
+- **평가**: `/tmp/eval_gs2m.py` (Umeyama + COLMAP 공간 CD/F-score)
+
+---
+
+
+## 3m_1 드론 데이터 평가 파이프라인 설계 (2026-06-25 확정)
+
+### 목적
+실제 드론 촬영 데이터(GT 없음) → GS-2M / 2DGS / MILo 3모델 비교
+- **정량**: PSNR / SSIM / LPIPS (NVS, held-out test views)
+- **정성**: 메시 추출 후 시각 비교 (GT 없으므로 CD 불가)
+
+### ❌ 첫 번째 시도 폐기 사유: focal 버그
+
+MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그 해상도 기준으로 저장.
+변환 스크립트에서 원본 해상도(1920)로 스케일백을 누락.
+
+| 항목 | 잘못된 값 | 올바른 값 |
+|------|----------|----------|
+| MASt3R 처리 해상도 | 512×288 | — |
+| 저장된 focal | 359.88px | — |
+| 스케일 팩터 | 누락 | 1920/512 = **×3.75** |
+| 1920px 기준 focal | ❌ 359.88 (FOV 139°) | ✅ **1349.55** (FOV 71°) |
+
+→ 카메라가 사실상 어안렌즈로 설정되어 학습 → PSNR 16dB (정상 22dB+)
+
+### 데이터 준비 (재실행 필요)
+
+- **소스**: sysai3 `~/Desktop/data/drone_real/3m_1/` (55장, 매 10프레임)
+- **포즈**: `drone_real_sfm/3m_1/poses.npy` (55,4,4) c2w
+- **COLMAP 변환 수정 사항**:
+  - `focal = focals_npy[0] * (1920 / 512)` = **1349.55px**
+  - cx=960, cy=540 (변경 없음)
+  - images.txt: poses.npy 순서 = 이미지 정렬 순서 ✅ 확인됨
+  - points3D.ply: 200k 다운샘플 (0pt 버그 수정 유지)
+
+### 학습 설정 (확정)
+
+| 항목 | 설정 | 비고 |
+|------|------|------|
+| 해상도 | **1920×1080** (코드 패치 필요) | `camera_utils.py` 1600 캡 제거 |
+| eval | `--eval` (llffhold=8) | 7장 held-out test |
+| iter | GS-2M/2DGS: 30k, MILo: 18k | 각자 수렴 스케줄 |
+| points3D | 200k 다운샘플 PLY | |
+
+> ⚠️ **1920 코드 패치**: GS-2M/2DGS/MILo 모두 `utils/camera_utils.py`에 `if orig_w > 1600: rescale` 하드코딩됨
+> → 각 모델의 `camera_utils.py`에서 해당 분기 제거 또는 1920으로 임계값 상향 필요
+
+### 평가 파이프라인 (3단계)
+
+```
+1. train.py --eval        → 학습 + PSNR 출력 (train 로그에서)
+2. render.py              → test 뷰 렌더링
+3. metrics.py             → SSIM / LPIPS 계산
+```
+
+> ⚠️ SSIM/LPIPS는 train 로그에 **안 나옴** — 반드시 render→metrics 실행 필요
+
+### 메시 추출 방식 (모델별 상이, 정상)
+
+| 모델 | 방식 | 실행 |
+|------|------|------|
+| GS-2M | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --extract_mesh` |
+| 2DGS | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --mesh` |
+| MILo | 학습된 occupancy/SDF → Marching Tetrahedra | `mesh_extract_sdf.py` |
+
+> TSDF `voxel_size = max_depth/1024`, `sdf_trunc = 4×voxel` — 씬 스케일 자동 적응 (수동 튜닝 불필요)
+
+### NVS 결과 (실행 후 업데이트 예정)
+
+| 방법 | iter | PSNR (dB) | SSIM | LPIPS | 메시 |
+|------|------|-----------|------|-------|------|
+| GS-2M | 30k | - | - | - | TSDF |
+| 2DGS | 30k | - | - | - | TSDF |
+| MILo | 18k | - | - | - | SDF |
+
+---
+
+
+## AirSim GPS 오차 시뮬레이션 & Waypoint 개수 결정 (2026-07-09)
+
+### 목적
+
+실제 드론 촬영 계획(waypoint 개수, 반경)을 정하기 전에, GPS 오차가 실제 비행경로/waypoint 도달 오차에 얼마나 영향을 주는지 AirSim 시뮬레이션으로 먼저 정량화. 그 결과를 바탕으로 MASt3R-SfM 입력용 waypoint 개수(사진 장수)를 공학적으로 결정하고, 실제 촬영 스크립트를 준비.
+
+### GPS 오차 모델 (Cosys-AirSim estimator, 신규 구현)
+
+| 항목 | 값/방식 |
+|---|---|
+| 대상 하드웨어 | u-blox MAX-M10S (M10050) |
+| 수평 오차 | 1.5m CEP (데이터시트) |
+| 수직 오차 | 2.5m LEP (스펙 미기재, 수평의 ~1.7배로 가정) |
+| 갱신율 | 10Hz, latency 0.1s |
+| TTFF | 26s (cold start; 이 구간 동안 GPS 출력 자체가 없음 → 스폰 위치 고정) |
+| 오차 구조 | Gauss-Markov 바이어스(분산 90%, τ=60s) + 백색잡음(10%) — PX4 SITL `gazebo_gps_plugin`과 동일 계열 |
+| Heading 오차 | QMC5883L급, 2° 표류 바이어스(τ=120s) |
+| 제어 반영 | 저역통과(시상수 5s) 필터 — 빠른 백색잡음은 걸러내되 느린 바이어스는 실제 제어용 위치추정(estimator)에 통과시켜, 실비행처럼 GPS 오차가 궤적에 흔들림으로 나타나게 함 |
+
+- 파일: `Plugins/AirSim/Source/AirLib/include/vehicles/multirotor/firmwares/simple_flight/AirSimSimpleFlightEstimatorGps.hpp` (신규 파일, 원본 estimator는 미수정)
+- 배선: `SimpleFlightApi.hpp`에서 GPS 센서 참조 3줄만 추가
+- settings.json 프리셋 (`D:\UE_5.4\Engine\Binaries\Win64\`): `settings_disturbed.json`(바람 3m/s + GPS 오차, 현재 활성), `settings_baseline.json`(외란 없음, ablation 기준경로용)
+
+> ⚠️ **시행착오**: 첫 시도는 완벽한 ground-truth 속도로 dead-reckoning + 분산기반 칼만게인 조합 → 관성이 완벽하다고 가정되어 GPS를 0.0015%만 반영, 오차가 사실상 사라짐(truth-est 간극 2.4cm). 시상수 고정 저역통과 필터로 교체 후 간극 평균 2.5m(≈GPS CEP 스케일)로 정상화 확인.
+
+### Waypoint 개수 결정 — 기하 오차 vs GPS 오차 균형
+
+원을 n개 점으로 근사할 때 코너커팅(기하) 오차 ≈ R(1-cos(π/n)). R=15m 기준:
+
+| n | 기하 오차 | 판단 |
+|---|---|---|
+| 4 | 4.4m | GPS 오차(1.5m CEP)의 3배 — 측정을 오염시킴 |
+| 8 | 1.14m | 경계선 |
+| **12** | **0.51m** | GPS 오차의 1/3 — 균형점, 실제 비행 waypoint 개수 추천값 |
+| 36 | 0.06m | GPS 오차 순수 측정(ablation)용 — 실제 임무엔 과잉 |
+
+→ MASt3R-SfM 최소 요구 뷰 수(문헌상 객체 중심 sparse-view 6~8장)와도 부합 → **실제 비행은 12 waypoint 권장**.
+
+### 스크립트
+
+`D:\epic\CitySample\scripts\waypoint_gps_error_test.py` (Cosys-AirSim, cosysairsim 파이썬 클라이언트, RPC 포트 47000)
+
+- `--circle`: 연속경로(`moveOnPathAsync`)로 원형 비행, 실제/추정 위치를 실시간 샘플링 → CSV (GPS 오차 정량화용)
+- `--capture`: 각 지점에서 정지(`moveToPositionAsync`) + 중심 오브젝트를 향해 yaw 자동 조준 + 촬영 → `{out_dir}/NNN.png` + `capture_log.csv`(참값/추정 pose, eph/epv 포함) — **MASt3R-SfM 입력용**
+- `--targets <오브젝트명>`: `simGetObjectPose`로 씬 오브젝트(예: `StaticMeshActor_7`) 위치를 자동 조회해 원 중심으로 사용 (UE 에디터 액터 라벨과 내부 `GetName()`이 다를 수 있음 — `--list-objects ".*"` 로 사전 확인 필요)
+- 예: `--capture --targets StaticMeshActor_7 --radius 15 --num-points 18 --out-dir captures_18`
+
+### 현재 상태 / 다음 단계
+
+- [x] GPS 오차 모델 구현 + 검증 (제어 루프에 실제 반영 확인, truth-est 간극 ~2.5m로 정상화)
+- [x] 18장 MASt3R-SfM 정합 서버에서 1회 완료
+- [ ] AirSim `--capture`로 18장 촬영 → 각도 균등 서브샘플링(12/8/6장) → MASt3R-SfM 재실행 → 18장 결과 기준 포즈/포인트클라우드 비교(ICP RMSE, 카메라 등록 성공률)로 최소 waypoint 개수 실측 검증
+- [ ] GPS 오차 몬테카를로 반복(시드 다중화, 30~100회) — waypoint 추종오차의 분포/CEP 추정. 현재 난수 시드가 코드에 고정돼 있어 Python에서 제어 불가 → RPC로 시드 노출 필요(미착수)
+
+---
+
+
+## 실촬영 waypoint 개수 ablation + 서버 MASt3R-SfM 검증 (2026-07-09)
+
+### 촬영 스크립트 전환
+
+커스텀 `waypoint_gps_error_test.py` 대신, 기존 프로젝트 스크립트 `D:\epic\CitySample\test_auto_operate_optimal.py`를 그대로 사용(중복 구현 방지). 카메라(짐벌)는 이미 `CAMERA_PITCH_DEG=-45.0`로 고정 구현되어 있어 고도/반경과 무관하게 45도 하향 촬영됨. `--mode orbit_only`로 원형 궤도 지정 waypoint 수만큼 정지-촬영, 각 프레임에 `vehicle_pose`(ground truth)와 `multirotor_kinematics`(GPS-필터링 추정치)를 함께 JSON으로 기록.
+
+### 고도 드리프트 버그 (발견 + 수정)
+
+- **증상**: 반경10m/고도4m 지정 촬영(`captures_4m_r11`)에서 `vehicle_pose.z`(실제 고도)가 -7.5m → -11m까지 표류. `multirotor_kinematics.position.z`(추정치)는 -4~-4.8m로 정상 표시 — 즉 **드론이 실제로는 명령한 4m보다 훨씬 높이 떠서, 잘못된 추정치를 4m로 보이게 만드는 중**이었음.
+- **원인**: 수평(X/Y)과 동일한 Gauss-Markov GPS 바이어스 모델을 Z축에도 그대로 적용(EpvFinal=2.5). 상관시간(τ=60s)이 촬영 1회 비행시간(~30~40s)보다 길어서, 한 번의 큰 Z바이어스 표본이 비행 내내 거의 고정값으로 유지됨 → 고도유지 제어기가 편향된 추정치를 4m로 맞추려다 실제 고도를 계속 밀어올림. 실기체는 이 문제를 기압계(정확·표류 없음)로 회피하는데, 시뮬레이션은 GPS-Z(가장 나쁜 채널)를 그대로 쓰고 있었음.
+- **수정**: `AirSimSimpleFlightEstimatorGps.hpp`에 `getBaroAltitude()` 추가 — Z 추정치는 GPS Gauss-Markov 바이어스를 완전히 우회하고 매 틱 `true_z + 백색잡음(σ=0.15m)`만 사용. 검증(`captures_4m_r10`): 실제 고도 -4.1~-4.65m로 안정화(±0.1~0.3m), 수평 GPS 오차(추정-실제 간극 1.4~2.9m)는 정상적으로 유지됨.
+
+### MASt3R-SfM 서버 환경 문제 해결
+
+- **증상**: `conda recon3d` 환경에서 실행 시 `ImportError: GLIBCXX_3.4.29 not found`(PIL/Lerc, libstdc++ 구버전) 발생. `LD_LIBRARY_PATH`로 conda 환경의 최신 libstdc++를 우선시키면 PIL은 해결되나 `AttributeError: torch._C has no attribute _OutOfMemoryError`(torch CUDA 확장 ABI 깨짐)로 다른 에러 발생 — PIL과 torch가 서로 다른 libstdc++ 버전을 요구하는 환경 자체 결함.
+- **해결**: `recon3d` 대신 기존에 준비되어 있던 **`venv-mast3r`**(`/home/sdh/Desktop/venvs/venv-mast3r`, python3.10, torch 2.1.2+cu121) 사용 — PIL/torch 동시 임포트 정상 확인. `run_mast3r_sfm.py`는 `/home/sdh/Desktop/models/MAST3R_2/`에 위치.
+- **주의**: sysai3 로그인 셸 `.bashrc`에 문법 오류(`line 3: unexpected token 'fi'`) 있음 — 매 SSH 세션마다 경고 출력되지만 명령 실행 자체엔 영향 없음(작업 범위가 `~/Desktop/` 이하로 제한되어 있어 별도 수정하지 않음).
+
+### Waypoint 개수 ablation 결과 (반경10m/고도4m, `scene_graph=retrieval-20-5` — 프로젝트 표준)
+
+| 데이터셋 | 장수 | 외란 | 매칭 페어 | 포인트 수 |
+|---|---|---|---|---|
+| `captures_4m_r10_n8` | 8 | 있음 | 78쌍 | 650,879 |
+| `captures_4m_r10` | 12 | 있음 | 174쌍 | 752,969 |
+| `captures_4m_r10_n17` | 17 | 있음 | 318쌍 | 1,177,574 |
+| `captures_4m_r10_n17_baseline` | 17 | 없음(바람0, GPS오차~0) | 318쌍 | 1,164,628 |
+
+- retrieval anchor 수(Na=20)가 실험 이미지 수(8~17장)보다 많아, 이 규모에서는 retrieval이 사실상 complete 그래프와 동일하게 동작(초기 `scene_graph=complete`로 돌린 결과와 포인트 수 거의 일치 — 12장 750,305 vs 752,969, 8장 652,179 vs 650,879). 대형 데이터셋(수십~수백 장)에서만 retrieval의 효율 이점이 실제로 발휘될 것으로 예상.
+- 결과 파일(`pointcloud.ply`/`poses.npy`/`focals.npy`) 전부 `C:\Users\손동한\Desktop\mast3r_results\<데이터셋명>[_retrieval]\`로 다운로드 완료 — 로컬에서 CloudCompare로 시각 비교 가능.
+- 다음 단계: 12/8/17장 결과의 포인트클라우드 밀도/노이즈를 GT(시뮬레이션 실제 지오메트리) 대비 정량 비교(ICP RMSE 등)하여 "12개가 균형점"이라는 기하학적 추정을 실측으로 검증할 것.
+
+### settings.json 프리셋 전환 방법
+
+`D:\UE_5.4\Engine\Binaries\Win64\settings.json`이 실제 활성 파일(우선순위: 커맨드라인 > 실행파일 폴더 > 실행 폴더 > `Documents\AirSim\`, `Documents` 경로는 최하위라 무시되기 쉬움 — 주의). `settings_baseline.json`(외란 없음) / `settings_disturbed.json`(바람+GPS 오차) 두 프리셋을 파일로 복사해 스왑하는 방식 사용. 전환 후 UE5 Play를 재시작해야 반영됨(런타임 중 설정 재로드 안 됨).
+
+
+## 실제 드론 데이터 복원: 3m/5m/7m combined (2026-06-29)
 
 ### 데이터
 
@@ -860,666 +1671,10 @@ CLAHE가 단조 대비변환이라 NCC 매칭에 불변인 점을 지적, 비단
 
 ---
 
-## 8. 시뮬레이션 4m 독립 데이터셋 (2026-06-29)
-
-> **독립 데이터셋**: `real_test_4m_old`는 AirSim/Unreal 단일 씬의 4m 고도 시뮬레이션.
-> 3m, 7m과 동일 씬 → GT 메시 재사용 가능. 다고도 조합 실험용으로 사용.
-
-### 실험 조건
-
-| 항목 | 값 |
-|---|---|
-| 데이터 | 4m 고도, **17장** |
-| 이미지 경로 | `datasets/real_test_4m_old/rgb/` (000000~000016.png) |
-| 해상도 | 1920×1080 |
-| GT 메시 | 동일 (`gt_scene_clean.ply`, `gt_cubes.ply`) |
-| prior | **① ply 초기화** 전 모델 공통 적용 (MASt3R pointcloud) |
-| 외부 depth | ❌ 없음 (공정 비교) |
-
-### 포즈 품질 (Umeyama Sim3, 2026-06-29)
-
-| 항목 | 4m old (17장) | 3m uniform (참고) |
-|---|---|---|
-| ATE RMSE | **0.029 cm** | 0.76 cm |
-| ATE Max | 0.095 cm | — |
-| RPE 회전 Mean | 0.58° | 0.23° |
-| Scale | 3.865 | 3.08 |
-
-> 단일 고도 단독 실행 → scale mismatch 없음 → ATE 매우 우수.
-
-### 학습 진행 상황 (2026-06-29 갱신)
-
-| 모델 | 환경 | 상태 |
-|---|---|---|
-| **2DGS** | venv-2dgs | ✅ 학습+메시 완료 |
-| **3DGS** | miniforge3/gs3d | ✅ 학습 완료 |
-| **GS-2M** | miniforge3/gs2m | ✅ 학습(30k, PSNR 31.74) + 메시 완료 |
-| **MILo** | venv-milo | ✅ 학습(18k) + 메시 완료 |
-
-> **메시 산출물 (2026-06-29, 4모델 전부 완료)**
-> - GS-2M: `real_test_4m_old__gs2m/train/ours_30000/mesh/tsdf_post.ply` (193M, 3.94M V)
-> - MILo: `real_test_4m_old__milo/mesh_learnable_sdf.ply` (146M, vertex color 포함)
-> - 메시 추출 명령: GS-2M `render.py -m <out> --extract_mesh --skip_test` / MILo `mesh_extract_sdf.py -s <colmap> -m <out> --rasterizer radegs` (milo/milo/ 에서)
-> - 메시 추출 명령(추가): 2DGS `render.py -m <out> -s <colmap> --num_cluster 1` (voxel_size/depth_trunc/sdf_trunc는 지정하지 말 것 — 아래 주의사항 참고) / 3DGS `/tmp/run_3dgs_tsdf_4m.py` (open3d TSDF)
-> - ⚠️ **주의**: 과거 이 문서에 2DGS 명령을 `--voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04` 절대값으로 기록했었으나, 이는 GT-free 원칙 위반이자 불필요한 오버라이드였음. GS-2M/2DGS 모두 이 인자들을 비워두면(기본값 -1) 카메라 포즈 기반 씬 반지름(GS-2M: `cameras_extent`, 2DGS: `radius`, 둘 다 GT 불필요)으로 자동 스케일링됨 — MASt3R가 up-to-scale이라 씬마다 절대값이 다르게 맞아야 하므로 반드시 기본값(자동 계산)을 쓸 것. (2026-07-06, [[pipeline_improvement_plan]] 4번 항목 조사에서 확인)
-
-### 메시 CD/F-score 평가 결과 (2026-06-29, GT 큐브 Cube8-12 기준)
-
-> 정렬: MASt3R poses ↔ GT meta(NED) **Umeyama Sim3 1회** (단일 17장, ATE 1.86cm, s=3.865).
-> 평가 스크립트: `/tmp/eval_mesh_4m_old.py` (combined_uniform 평가의 4m old 버전).
-> GT를 COLMAP 공간으로 역변환 후 큐브 주변 crop → CD/F@thr (threshold는 COLMAP scale 적용).
-
-| 순위 | 모델 | CD↓ | F@1cm↑ | F@5cm↑ | F@10cm↑ |
-|---|---|---|---|---|---|
-| 🥇 | **2DGS** | **3.63cm** | 0.2483 | **0.5408** | **0.8556** |
-| 🥈 | **GS-2M** | 3.69cm | 0.2743 | 0.5280 | 0.8496 |
-| 🥉 | **MILo** | 3.77cm | **0.2746** | 0.5284 | 0.8350 |
-| — | 3DGS | 측정불가 | — | — | — |
-
-> **3DGS 측정불가**: TSDF 메시가 GT 큐브 영역 crop 후 표면 0개 → 큐브 복원 실패(floater/지면 위주).
-> combined_uniform에서도 3DGS 환경 F@10=0.000 → **동일 현상**.
-
-#### 기존 3m+7m(combined_uniform) 물체 결과와 비교
-
-| 모델 | 4m old CD | 4m F@10 | combined 물체 CD | combined 물체 F@10 |
-|---|---|---|---|---|
-| 2DGS | 3.63cm | 0.856 | (최고) | 0.914 |
-| GS-2M | 3.69cm | 0.850 | 5.15cm | 0.789 |
-| MILo | 3.77cm | 0.835 | 7.32cm | 0.659 |
-| 3DGS | 실패 | — | 실패 | 0.000 |
-
-> **결론: 순위·경향 기존과 동일** — 2DGS ≥ GS-2M > MILo ≫ 3DGS, 3DGS 메시 붕괴도 재현.
-> **차이점**: 4m 단독(17장)은 scale mismatch가 없어 CD 절대값이 전반적으로 더 낮고(3.6~3.8cm),
-> **모델 간 격차가 매우 작음**(0.14cm 차). combined는 3m↔7m inter-orbit 오차로 모델 간 격차가 컸음(5→7cm).
-> → 데이터 품질(단일고도 균일)이 좋을수록 모델 선택의 영향이 줄어든다는 점을 정량 확인.
-
-#### 박스(큐브)만 tight crop 결과 (±5cm, 지면 제외, 2026-06-30)
-
-> 스크립트: `/tmp/eval_box_crop_4m.py`. GT 큐브 5개 각각 bbox±5cm만 pred에서 crop → CD/F-score.
-> 지면 floater 제외로 큐브 복원 정확도만 순수 측정.
-
-| 모델 | CD↓ | F@1cm↑ | F@5cm↑ | F@10cm↑ |
-|---|---|---|---|---|
-| **2DGS** | **2.11cm** | 0.3850 | **0.7893** | 1.000 |
-| **GS-2M** | 2.14cm | **0.4324** | 0.7793 | 1.000 |
-| **MILo** | 2.13cm | 0.4309 | 0.7881 | 1.000 |
-| 3DGS | 실패(0개) | — | — | — |
-
-> **해석**: CD는 2DGS가 미세하게 유리(floater 없음), F@1cm는 GS-2M이 높음(조밀 vertex → 근접 커버리지 우위).
-> CD와 F@1cm의 상충은 각 지표의 특성 차이: CD는 outlier(먼 점)에 민감, F@1cm는 근접 커버리지에 민감.
-
-#### 논문 DTU 벤치마크 CD vs 우리 시뮬 4m 비교
-
-| 모델 | 우리 4m CD (박스 crop) | 논문 DTU CD | 씬 조건 |
-|---|---|---|---|
-| **2DGS** | **2.11cm** | **~0.48mm** | DTU: 텍스처 풍부, 49+장, 물체 스케일 |
-| **GS-2M** | 2.14cm | ~0.80mm | DTU: GS-2M 논문 자체 보고 |
-| **MILo** | 2.13cm | ~0.62mm | DTU 기준 추정 |
-| **PGSR** | 미실험 | 0.52mm | DTU 최고 성능 참고값 |
-
-> **절대값 차이(~25×)**: DTU는 cm 스케일 물체·정밀 3D 스캐너 GT. 우리는 4m 고도 항공 씬·17장. 씬 스케일 상이 → 직접 비교 불가.
-> **순위 비교**: 2DGS ≥ GS-2M 경향은 DTU·우리 씬 모두 유사. 단, 우리 씬은 저텍스처+sparse view로 GS-2M BRDF 분해가 ill-posed → 모델 간 격차가 DTU보다 훨씬 작음(0.03cm 차).
-
-### 실행 명령 (4m old — 재현용)
-
-```bash
-# GS-2M (30k)
-source /home/sdh/miniforge3/bin/activate gs2m && \
-python3 /home/sdh/Desktop/models/GS-2M/train.py \
-  -s /home/sdh/Desktop/data/experiments/real_test_4m_old__colmap \
-  -m /home/sdh/Desktop/data/experiments/real_test_4m_old__gs2m \
-  --iterations 30000 --port 6012
-
-# MILo (18k, outdoor+radegs 필수, milo/milo/ 에서 실행)
-source /home/sdh/Desktop/venvs/venv-milo/bin/activate && cd /home/sdh/Desktop/models/milo/milo && \
-python3 train.py \
-  -s /home/sdh/Desktop/data/experiments/real_test_4m_old__colmap \
-  -m /home/sdh/Desktop/data/experiments/real_test_4m_old__milo \
-  --iterations 18000 --port 6013 --imp_metric outdoor --rasterizer radegs
-```
-
-> ⚠️ 주의: MILo는 `--imp_metric outdoor --rasterizer radegs` 빠뜨리면 안 됨.
-> COLMAP/PLY prior 경로: `real_test_4m_old__colmap`, `real_test_4m_old__mast3r/pointcloud.ply`.
 
 ---
 
-## 9. retrieval-20-5 채택 & GS-2M 파이프라인 개선 조사 (2026-07-05~07)
-
-> 상세 근거/수치는 전부 `pipeline_improvement_plan.md`에 있음. 여기는 요약+포인터만.
-
-### scene_graph=retrieval-20-5 최종 채택 (2026-07-05)
-
-- swin-5(순차 슬라이딩 윈도) 대신 MASt3R-SfM `scene_graph=retrieval` (Na=20 anchor, k=5 neighbor)로 전환.
-- 근거: 3m+7m 다고도 조합에서 ATE 10배 개선(박스 분리 문제 해결), 4m 단일고도에서도 궤도 매끄러움 1.9% 개선, 5m_1 실제 드론 데이터에서도 동등 이상.
-- **모든 신규 실험은 retrieval-20-5를 기본값으로 사용할 것.**
-
-### GS-2M 파이프라인 개선 4항목 조사 결과 (2026-07-06~07, `real_test_4m_old` 4m 시뮬 데이터 기준)
-
-| # | 항목 | 결론 |
-|---|---|---|
-| 2 | Depth Supervision | GS-2M 미지원(죽은 배선) — 구현 비용 大, 보류 |
-| 3 | Confidence/voxel/SOR 필터링 | ✅ 완료. GT-free 적응형 voxel(median NN distance 배수) 설계, k=1.4(~1cm)가 메시 단계 최종 최적(raw 대비 CD -1.2%, F@1cm +6.3%) |
-| 4 | 메시 추출 파라미터 정규화 | ✅ 이미 구현되어 있었음 — GS-2M/2DGS 둘 다 voxel_size 등을 비워두면 카메라 포즈 기반 자동 스케일링(GT 불필요). 과거 STATUS.md의 2DGS 하드코딩 명령은 안티패턴이라 삭제 |
-| — | 표면 지터 노이즈 / 딥러닝 디노이저 검토 | 오라클 실험 3종(discrete-snap/dedup/연속표면투영-밀도보존) 전부 raw/k1.4보다 나쁨(CD 2.46/2.43 vs 2.79~3.15cm) → 밀도를 count 기준 완전히 보존해도 결과가 나쁨 → 병목은 밀도 손실만이 아니라 **정확도 개선 개입 자체**(색상-위치 불일치, 단순 평면 표면에서 노이즈의 자연 산포가 오히려 Gaussian 국소형상 추정에 유리했을 가능성). 병합형(voxel/confidence merging)·변위형(StraightPCF 등) 디노이저 모두 폐기 |
-
-**핵심 방법론 교훈**: 점군 단계 proxy 지표(CD/F-score)로 고른 최적 파라미터가 GS-2M 메시 단계에서 정반대로 뒤집힘 — 반드시 최종 소비 단계까지 검증할 것. 오라클(이론적 최선) 실험도 밀도 보존 여부를 반드시 별도 확인해야 함(discrete-snap은 겉보기 count 유지에도 실제로는 밀도가 붕괴할 수 있음). 이 병목(작은 물체+저뷰수 씬에서 점 정확도 개선이 순이득이 아님)을 다루려면 "노이즈 제거/정교화"가 아니라 "관심 영역 점 늘리기" 방향이 유망한 다음 후보.
-
-### swin-5 vs retrieval-20-5 × raw vs filtered(k1.4) 4개 조합 최종 메시 검증 (2026-07-09)
-
-> 상세는 `pipeline_improvement_plan.md` §⑫. `real_test_4m_old` 기준 4개 전부 GS-2M 30k 학습→메시→`eval_mesh_4m_old_v2.py` 평가 완료.
-
-| | raw | filtered(k1.4) |
-|---|---|---|
-| **swin-5** | CD 18.05cm, F-score 전부 0 (박스 복원 실패, crop 내 점 0.2%) | **CD 4.20cm**, F@10cm 0.81 (극적 개선) |
-| **retrieval-20-5** | CD 2.46cm, F@10cm 0.99 | CD 2.43cm, F@10cm 0.99 (미미한 개선) |
-
-> **핵심 발견**: "필터링 효과는 미미하다"는 기존 결론(§9 표 3번 항목)은 **retrieval-20-5 한정**이었음. SfM 품질이 나쁜 swin-5에서는 필터링이 복원 성패 자체를 가름 — raw는 박스 영역이 통째로 비어 F-score 0, 필터링 후에야 정상 복원. voxel dedup+SOR이 swin-5의 (아직 원인 미확인) 과밀/중복 노이즈를 제거해준 것으로 추정. retrieval-20-5 우위 자체는 변함없음.
-
----
-
-# 🎯 최종 시뮬레이션 환경 검증 실험 계획 (2026-06-28)
-
-> **위치 부여**: 이 실험은 **시뮬레이션(AirSim/Unreal) 환경에서의 마지막 검증**이다.
-> 여기서 MASt3R-SfM 기반 pose-free 파이프라인(포즈 추정 → ply 초기화 → 3D 복원)이
-> 시뮬레이션 GT 대비 정량적으로 검증되면, 이후 실제 드론 데이터로 넘어간다.
-> 실제 드론에는 GT가 없으므로, **GT로 정량 검증이 가능한 것은 이 시뮬레이션 단계가 마지막**이다.
-
-## 0. 데이터셋 / 환경
-
-| 항목 | 값 |
-|---|---|
-| **데이터셋** | `real_test_3m_uniform`(17장) + `real_test_7m_uniform`(17장) = **34장** ← **최종 확정** |
-| Google Drive | `1-RAGc9v-JDg6tcDdHrCDLmn3zTxm0smA` (`real_test_3-7m_uniform.zip`, 135MB) |
-| 서버 경로 | `/home/sdh/Desktop/data/datasets/real_test_3m_uniform/`, `real_test_7m_uniform/` |
-| 해상도 | 1920×1080 |
-| 출처 | AirSim/Unreal 시뮬레이션 (orbit, **균일 촬영**) |
-| 서버 | sysai3, RTX A6000 48GB |
-| 포즈 | ✅ MASt3R-SfM 완료 → `real_test_combined_uniform__mast3r/poses.npy` (34,4,4) |
-| 초기 점군 | ✅ `pointcloud.ply` 1,804,901 pts → 500k 다운샘플 → COLMAP points3D.txt |
-
-> ⚠️ **데이터셋 교체 사유 (2026-06-28)**: 이전 `real_test_3m/7m`은 웨이포인트 기반 비행으로
-> 각도 간격 std=9.4° (14°~43°), 타임스탬프 간격 3.8~7.9s로 **비균일 촬영**이었음.
-> 신규 데이터셋은 각도 간격 std=1.5~2.5° (18°~31°)로 **거의 균일**하게 개선.
-> 이전 실험 결과 전체 폐기, 신규 데이터로 처음부터 재시작.
-
-### 포즈 품질 (per-group Umeyama Sim(3) 정렬, 2026-06-28 측정)
-
-| 항목 | 3m (17장) | 7m (17장) | 전체 |
-|---|---|---|---|
-| ATE RMSE | **0.76 cm** | **27.6 cm** | 19.52 cm |
-| RPE 회전 | 0.23° | 0.67° | — |
-| focal (1920px 기준) | 969.40 px | 969.40 px | (shared_intrinsics) |
-
-> ⚠️ 7m ATE 27.6cm는 swin-5 그래프 경계효과: 3m↔7m 간 cross-altitude 연결로
-> 7m frame 0 (103cm 이상치) 발생. 7m 단독 실행 시 ATE=2.03cm였으나 합산 후 악화.
-> 근본 원인: 고도 차이로 feature matching 불충분 → inter-orbit scale mismatch ~11.6%.
-> **3m+7m 합산 복원 유지 이유**: 지형 커버리지 확보 목적.
-
-## 1. 대원칙: GT는 평가에만, 학습엔 절대 안 씀
-
-| 단계 | GT 사용? |
-|---|---|
-| 포즈 추정 / ply 초기화 / 모델 학습 / 메시 추출 | ❌ **GT 0% (100% MASt3R 추정값)** |
-| 메시 정렬 + CD/F-score 평가 | ✅ GT 메시를 **정답지로만** (DTU/TNT 표준 관행과 동일) |
-| 메시 정렬용 Sim(3) | ✅ GT 카메라 포즈를 **평가 시점 정렬에만** (학습 leakage 아님) |
-
-> GT를 학습에 넣으면 leakage(부정행위)지만, 평가 정답지로 쓰는 것은 모든 surface
-> reconstruction 논문(DTU Chamfer, TNT F-score)의 표준이다.
-
-## 2. prior 정의 (혼동 방지 — 명확히 분리)
-
-prior는 두 가지가 있으며 **서로 다른 것**이다:
-
-| prior | 정체 | 역할 |
-|---|---|---|
-| **① ply 초기화** | MASt3R-SfM `pointcloud.ply` (1.8M점, 500k 다운샘플 후 COLMAP 투입) | 가우시안 시작 위치 (input). **모든 모델 공통** |
-| **② depth supervision** | MASt3R 렌더 depth → invdepth L1 loss (`--depths`) | 학습 중 외부 깊이 정규화 |
-
-- **"외부 depth"**(②)와 **"모델 내부가 자체 렌더링하는 depth"**(2DGS depth-distortion, TSDF fusion용 depth 등)는 다름. 후자는 알고리즘 본질이라 끌 수 없고 당연히 씀.
-- 우리가 통제하는 변수는 ②(외부 MASt3R depth supervision)뿐.
-
-## 3. 실험 트랙 (2개)
-
-### 트랙 ① 메시 복원 (CD/F-score) — surface method 비교
-
-| 설정 | 값 |
-|---|---|
-| 학습 | `eval=False`, **34장 전체** (held-out 없음 — 복원은 전량 투입이 정석) |
-| 통일 prior | **① ply 초기화만** (외부 depth supervision ② 없음 → 공정) |
-| 정규화 | 각 모델 **native 방식** (끌 수 없는 본연의 것) |
-| 평가 | 추출 메시 vs **언리얼 export GT 메시**, CD↓ / F-score↑ |
-
-| 모델 | 메시 추출 방식 | ply-init | 외부 depth |
-|---|---|---|---|
-| **3DGS + TSDF** | 별도 후처리 (open3d TSDF) | ✅ | ❌ |
-| **2DGS** | native (surfel→TSDF) | ✅ | ❌ |
-| **GS-2M** | native (TSDF) | ✅ | ❌ |
-| **MILo** | native (learnable SDF→marching cubes) | ✅ | ❌ |
-
-> 3DGS는 surface method가 아님(볼류메트릭 타원체) → TSDF 돌려도 noisy.
-> baseline으로 포함해 "왜 2DGS/MILo가 필요한가"를 정량으로 보임. 표에 "별도 TSDF" 명시.
-
-### 트랙 ② NVS (test PSNR) — depth supervision ablation
-
-| 설정 | 값 |
-|---|---|
-| 학습 | `eval=True`, llffhold=8 → **29 train / 5 test** |
-| test 5장 | `3m_000000, 3m_000008, 3m_000016, 7m_000007, 7m_000015` (자동 선택, llffhold=8) |
-| 평가 | **held-out test 뷰** PSNR↑/SSIM↑/LPIPS↓ |
-
-> 헤드라인 메시지: "② depth supervision이 **안 본 각도(test)** 품질을 얼마나 올리나".
-> ⚠️ train-view PSNR은 암기 점수이므로 **성능으로 제시 금지**. 보여야 하면 "training-view
-> reconstruction fidelity"로 라벨 명시.
-
-**모델별 외부 depth supervision 지원 여부 (2026-06-29 코드 확인):**
-
-| 모델 | 외부 depth 지원 | 방식 | 비고 |
-|---|---|---|---|
-| **3DGS** | ✅ | `--depths` 플래그, invdepth L1 loss (`depth_l1_weight` 지수감소) | 메인 ablation 대상 |
-| **GS-2M** | ❌ | `depths` 인수 존재하나 train.py에 미사용. `depth_normal_loss`는 내부 일관성용 | 외부 depth 불가 |
-| **2DGS** | ❌ | `depth_ratio`는 내부 depth-normal 일관성용. 외부 depth 파이프라인 없음 | 외부 depth 불가 |
-| **MILo** | ✅ | `mast3r_depth_dir` config. depth ordering supervision (rank-based, metric 아님) | 3m_1에서 구현 완료 |
-
-> **결론**: 외부 MASt3R depth supervision은 **3DGS와 MILo에만 적용 가능**.
-> 2DGS/GS-2M은 각 모델 고유의 내부 supervision 방식을 사용하므로 depth ablation 대상 외.
-
-**진행 상황 (2026-06-29 01:14 KST):**
-
-| 모델 | prior | 7k test PSNR | 30k test PSNR | 상태 |
-|---|---|---|---|---|
-| **3DGS** (eval=True) | ① ply-init만 | **20.54** | 19.61 | ✅ 완료 |
-| **3DGS + depth** (eval=True) | ① + ② MASt3R depth | 20.15 | 19.05 | ✅ 완료 |
-| **MILo** (eval=True, 선택) | ① ply-init만 | — | — | ⏳ 낮은 우선순위 |
-
-> **결과 해석**: depth supervision이 오히려 **−0.4dB 악화** (7k 기준).
-> 두 모델 모두 7k에서 peak → 30k에서 과적합 (3DGS 과적합 gap ~1dB).
-> 3m_1 결과(depth +0.09dB 미미)보다도 나쁜 결과 → MASt3R depth와 COLMAP이 동일 metric 스케일임에도
-> 이 씬에서 depth prior는 도움이 되지 않음.
-> **근본 원인 추정**: 34장 중 29장으로만 학습(eval=True) 시 지형 커버리지 부족 + 3m/7m 고도 차이
-> scale mismatch가 depth loss 방향을 혼란시킴.
-
-> ⚠️ 기존 `real_test_combined_uniform__3dgs`는 **eval=False**로 학습됨 (train PSNR=30.80dB).
-> Track ②용: `real_test_combined_uniform__3dgs_eval` (eval=True 재학습).
-
-**depth map 생성 완료 (2026-06-29):**
-- `/tmp/gen_depth_combined.py`: MASt3R pointcloud → 카메라별 투영 → 34장 depth.npy
-  - `R_w2c = R_c2w.T`, `t_w2c = -R_c2w.T @ t_c2w`, focal=969.40px (1920px 기준)
-  - 유효 픽셀: 690k~890k/frame, 깊이 범위 [0.92, 13.2]m ✅
-- `/tmp/convert_depth_combined.py`: .npy → uint16 invdepth PNG + depth_params.json
-  - COLMAP/MASt3R depth 스케일 비율=**0.9899** (동일 metric ✅)
-  - 출력: `real_test_combined_uniform__colmap/depths_png/` (34 PNG)
-  - `sparse/0/depth_params.json` (키: `3m_000000` 형식, 확장자 없음)
-- 3DGS `--depths depths_png` → `source_path/depths_png/` 자동 로드 ✅
-
-**test 프레임** (llffhold=8, 34장 정렬 기준):
-`3m_000000, 3m_000008, 3m_000016, 7m_000007, 7m_000015` (5장)
-
-## 4. 메시 평가 절차 (트랙 ①, 언리얼 GT 받은 후)
-
-```
-0단계  handedness 일치: 언리얼(left-handed) → 한 축 flip(예: Y→−Y) → right-handed
-        ※ Sim(3)는 det(R)=+1만 허용 → 거울상은 ICP로도 안 겹침. flip이 최우선.
-1단계  Sim(3) 정렬: GT 카메라 1:1 대응으로 결정(s≈3.49) + ICP 미세정렬
-2단계  cropping 통일: 복원 메시를 GT bbox(+margin)로 crop, 4개 모델 동일 적용
-        ※ CD 양방향 → 복원 메시의 GT-외 floater가 accuracy 부풀림 방지 (TNT foreground 논리)
-3단계  CD(양방향) + F-score @1cm/5cm/10cm 산출
-```
-
-### 4-1. GT 메시 (언리얼 export 완료, 2026-06-28 수령)
-
-| 항목 | 값 |
-|---|---|
-| **원본 파일** | `gt_scene_full.fbx` (4.0MB, Kaydara FBX Binary, 언리얼 export) |
-| 로컬 | `C:\Users\sdh97\Desktop\학교\캔위성\2차 발표자료\현재결과\gt_mesh\gt_scene_full.fbx` |
-| 서버 | `sdh@sysai3:/home/sdh/Desktop/data/gt_mesh/gt_scene_full.fbx` |
-| 출처 다운로드 | `C:\Users\sdh97\Downloads\my_box.fbx` (중복본 `my_box (1).fbx`는 동일 md5 → 삭제) |
-
-**FBX 내 메시 노드 (Geometry 10개):**
-- `Cube8`~`Cube12` — GT 큐브 5개 (기존 `Cube{8..12}.ply`와 동일)
-- `Cube` — 추가 큐브 1개 (기존 PLY엔 없던 것)
-- `Landscape` — **지면/지형 메시** (= 주변 환경)
-- `MI_LayerGround` — 지면 머티리얼
-- `UCX_*` — 언리얼 충돌 메시 (평가 제외 대상)
-
-> ⭐ **의의**: 이 FBX엔 큐브뿐 아니라 **`Landscape`(지면)**가 포함됨 → 기존 "지면 오염 편향"
-> (GT에 큐브만 있어 crop 안 지면 복원점이 Precision/CD를 왜곡) **해결 가능**.
-> 이제 "물체만(큐브)" 평가와 "환경 포함(큐브+지면)" 평가를 **둘 다** 산출 가능.
-
-### 4-2. FBX → PLY 변환 완료 (2026-06-29, 검증 통과)
-
-**도구**: 서버에 blender/assimp/pymeshlab 전무 → 격리 venv(`/tmp/venv-fbx`)에 `pyassimp` 설치.
-pymeshlab은 11개 메시를 1개로 병합해버려 부적합 → pyassimp로 노드별 접근.
-
-**핵심 발견 — Y축 handedness 반전**:
-- FBX 노드 월드변환 적용 후 큐브 좌표가 PLY와 **X·Z는 일치, Y만 부호 반전**
-  - 예: FBX `Cube8` Y[5063,5103] vs PLY Y[−5103,−5063]
-- 원인: 언리얼(left-handed) FBX export → assimp 임포트 시 Y축 부호. STATUS 0단계 handedness 그 자체
-- **조치**: `Y → −Y` flip 적용 → 기존 검증된 `Cube{8..12}.ply`(카메라 ATE 0.6cm 정렬)와
-  **maxΔ=0.000cm 완전 일치 확인** → 변환 신뢰성 검증됨
-
-**메시 구조 (pyassimp, 노드 월드변환 + Y-flip 적용)**:
-- `Cube8`~`Cube12`: 평가용 큐브 5개 (각 144V/48F)
-- `UCX_Cube*`: 충돌 메시 → **제외**
-- `Landscape`: **z=0 완전 평탄 지면**, ±252m (1.52M V/508k F)
-- `Cube` 노드: 메시 없는 그룹 노드 (무시)
-
-**산출 PLY** (서버 `/home/sdh/Desktop/data/gt_mesh/`, 로컬 `gt_mesh/`, Unreal cm 프레임):
-| 파일 | 내용 | 크기 | 용도 |
-|---|---|---|---|
-| `gt_cubes.ply` | 큐브 5개 | 720V/240F (12K) | **물체-only 평가** |
-| `gt_landscape.ply` | 지면 z=0 | 1.52M V (24M) | 지면 단독 |
-| `gt_scene_clean.ply` | 큐브+지면 (UCX 제외) | 1.52M V (24M) | **환경 포함 평가** (지면 오염 해소) |
-
-**변환 스크립트**: `/tmp/fbx_to_ply.py` (월드변환+Y-flip+UCX제외+큐브 검증 내장)
-
-> ⚠️ **환경 평가 시 주의**: `gt_landscape`는 ±252m 무한지면 → Recall 계산 시 GT를
-> **카메라 가시영역으로 crop** 필요 (안 그러면 미복원 원거리 지면이 Recall≈0 만듦).
-> 물체-only 평가는 큐브 bbox crop으로 충분.
-
-### 4-3. 메시 평가 결과 (2026-06-29, NED 공간 직접 CD)
-
-**평가 방법** (`/tmp/eval_env.py`):
-- 정렬: **3m Umeyama** (COLMAP→NED), s=3.0798, ATE=0.60cm (큐브가 3m 카메라 바로 아래)
-- NED(m) 공간 직접 CD/F-score, **밀도 일관 샘플링** (crop 영역 face만 80k 동일)
-- 환경 평가: 카메라 지면 footprint(2.1×2.1m)+1m crop, z∈[−1.2,0.3]
-- 물체 평가: 큐브 bbox+5cm crop
-
-**환경 포함 (gt_scene_clean = 큐브+지면)** — 지면 오염 해소된 정식 평가:
-
-| 순위 | 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
-|---|---|---|---|---|---|
-| 🥇 | **2DGS** | **6.85cm** | 0.028 | **0.156** | **0.914** |
-| 🥈 | GS-2M | 7.47cm | 0.020 | 0.123 | 0.897 |
-| 🥉 | MILo | 11.17cm | 0.008 | 0.080 | 0.366 |
-| 4 | 3DGS+TSDF | 89.80cm | 0.000 | 0.000 | 0.000 |
-
-**물체-only (gt_cubes = 큐브 5개)** — 참고:
-
-| 순위 | 모델 | CD↓ | F@5cm | F@10cm |
-|---|---|---|---|---|
-| 🥇 | **2DGS** | **4.93cm** | **0.635** | **0.800** |
-| 🥈 | GS-2M | 5.15cm | 0.622 | 0.789 |
-| 🥉 | MILo | 7.32cm | 0.448 | 0.659 |
-| 4 | 3DGS+TSDF | 큐브 bbox 내 surface 0개 (복원 실패) | — | — |
-
-> **해석** (최종, 4모델):
-> - **순위: 2DGS > GS-2M > MILo ≫ 3DGS** (물체·환경 일관)
-> - **2DGS ≈ GS-2M**: F@10 0.914 vs 0.897, 거친 형상 모두 양호. 1~5cm 정밀도에서 2DGS 근소 우위.
-> - **MILo 환경 F@10=0.366** (2DGS의 절반↓): MILo 메시의 **가장자리 스파이크 노이즈**가 지면
->   평탄도를 깸 (이전 real_test에서도 관찰된 MILo 고질). 물체-only(F@10=0.659)는 상대적으로 양호.
-> - **3DGS는 surface method 아님** → TSDF 메시가 수직 2.7m 두께 노이즈, 지면이 GT보다
->   0.16~2.86m 위에 분포 → 환경 CD 89.8cm, 큐브 bbox 내 surface 전무. baseline으로서
->   "왜 2DGS/GS-2M/MILo가 필요한가"를 정량 입증 (3DGS 원본 가우시안 top-view 시각자료도 확보).
-
-> ⚠️ **검증 이력 (편향 제거)**: 초기 평가는 ① 전체메시 균일샘플 → crop 영역 밀도 불일치,
-> ② margin 과대(11cm) → 지면 오염으로 CD 부풀림. 밀도 일관 샘플 + GT에 지면 포함으로 수정.
-> Recall@5cm은 margin 무관하게 robust (2DGS 1.0 vs 3DGS 0.096 — 초기부터 일관).
-
-### 4-4. MILo SOR 출력메시 실험 (2026-06-29, 재학습 없이 출력 메시에 SOR 적용)
-
-**방법**: `mesh_learnable_sdf.ply` (5,029,391V) → open3d SOR → 3강도 메시 저장 → 재평가  
-**환경**: `recon3d` env (open3d 0.19.0, libstdc++ 호환)
-
-| 강도 | nb | std | 보존V(%) | 출력 파일 |
-|---|---|---|---|---|
-| weak   | 30 | 2.0 | 96.7% (4,862,809V) | `mesh_sor_weak.ply` |
-| mid    | 30 | 1.0 | 91.9% (4,624,059V) | `mesh_sor_mid.ply` |
-| strong | 30 | 0.5 | 86.6% (4,354,600V) | `mesh_sor_strong.ply` |
-
-**물체-only (gt_cubes) 평가:**
-
-| 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
-|---|---|---|---|---|
-| MILo 원본 | 7.32cm | 0.081 | 0.448 | 0.659 |
-| SOR_weak   | 7.24cm | 0.082 | **0.449** | **0.661** |
-| SOR_mid    | **7.17cm** | 0.070 | 0.437 | 0.659 |
-| SOR_strong | 7.57cm | 0.039 | 0.368 | 0.631 |
-
-**환경포함 (gt_scene_clean) 평가:**
-
-| 모델 | CD↓ | F@1cm | F@5cm | F@10cm |
-|---|---|---|---|---|
-| MILo 원본 | 11.17cm | 0.008 | 0.080 | 0.366 |
-| SOR_weak   | 10.99cm | 0.008 | 0.082 | 0.375 |
-| SOR_mid    | **10.81cm** | 0.008 | 0.078 | **0.390** |
-| SOR_strong | **10.81cm** | 0.005 | 0.064 | 0.406 |
-
-> **결론**: 출력 메시 SOR은 효과가 미미하다.
-> - **SOR_mid**: 환경 F@10 0.366 → 0.390 (+0.024, +6.6%) 개선이 가장 좋은 tradeoff.
-> - **SOR_strong**: 환경 F@10 0.406이지만 물체 F@10 0.631로 크게 하락 (큐브 표면 정점 과도 제거).
-> - **전체 결론**: 출력 메시 SOR은 이전 COLMAP prior SOR 실험과 동일하게 효과 미미.
->   MILo 한계(환경 F@10≈0.4)는 edge spike 노이즈 구조 문제 → 알고리즘 수준 해결 필요.
-> - **최종 순위(환경 F@10) 변경 없음**: 2DGS(0.914) > GS-2M(0.897) ≫ MILo_SOR_mid(0.390) ≫ 3DGS(0.000)
-
-## 5. 시뮬레이션 실험 최종 결론 (2026-06-29 확정)
-
-### 핵심 결론
-
-| 항목 | 결론 |
-|---|---|
-| **최고 모델 (메시)** | **2DGS** — CD 6.85cm, F@10 0.914, 모든 지표 1위 |
-| **2위** | GS-2M — F@10 0.897, 근접하지만 전 지표 2위 |
-| **NVS depth prior** | 효과 없음 (−0.4dB 악화). depth가 아닌 데이터 품질이 병목 |
-| **GS-2M < 2DGS 이유** | BRDF 추정이 photometric gradient 부재 씬에서 ill-posed → 기하 왜곡 |
-| **다른 모델도 못 이김** | 이 씬의 한계(텍스처 빈약+sparse view)는 알고리즘이 아닌 데이터 문제. 복잡한 방법일수록 역효과 |
-
-### 조건부 명제 (일반화 주의)
-
-> **"텍스처가 빈약한 미터 스케일 sparse-view 야외 씬에서는 BRDF 기반 방법이 단순 surfel 기반보다 불리하다"**
->
-> GS-2M을 이기려면 더 좋은 알고리즘이 아니라 **더 좋은 데이터(텍스처, dense view)**가 필요.
-> 실제 드론 데이터(자연 텍스처 존재)에서는 결과가 달라질 수 있음.
-
-### F-score 스케일 해석 기준
-
-- F@1cm 낮음(0.028): 결함 아님. 미터 스케일 씬에서 1cm는 의도적으로 tight한 임계값
-- F@10cm 기준(0.914): 이 씬의 실용적 정확도 지표
-- CD 6.85cm: NED meter 기준 ~2m orbit 씬에서 합리적 수치
-
----
-
-## 6. 의존성 / 시작 순서
-
-| 트랙 | 필요 입력 | 상태 |
-|---|---|---|
-| **MASt3R-SfM** (포즈 + ply) | `real_test_3m_uniform` + `real_test_7m_uniform` | ✅ **완료** |
-| **COLMAP 변환** (`build_colmap_uniform.py`) | poses.npy + pointcloud.ply | ✅ **완료** → `real_test_combined_uniform__colmap/` |
-| **3DGS** (30k, gs3d env) | COLMAP | ✅ 학습+TSDF메시 완료 |
-| **2DGS** (30k, venv-2dgs) | COLMAP | ✅ 학습+메시 완료 |
-| **GS-2M** (30k, miniforge3/gs2m) | COLMAP | ✅ 학습+메시 완료 |
-| **MILo** (18k, venv-milo, outdoor+radegs) | COLMAP | ✅ 학습+메시 완료 |
-| 메시 추출 (4모델) | 학습 완료 체크포인트 | ✅ **완료** |
-| 메시 CD/F-score 평가 | GT + 4모델 메시 | ✅ **완료** (4-3 결과표) |
-| NVS depth ablation (3DGS eval=True) | MASt3R depth map 34장 | ✅ 완료 (peak PSNR 20.54 @7k) |
-| NVS depth ablation (3DGS+depth eval=True) | MASt3R depth map 34장 | ✅ 완료 (peak PSNR 20.15 @7k) |
-
-### 메시 추출 명령 (학습 완료 후)
-| 모델 | 명령 |
-|---|---|
-| 2DGS | `render.py --voxel_size 0.01 --depth_trunc 6.0 --sdf_trunc 0.04 --num_cluster 1` |
-| GS-2M | `render.py --extract_mesh --skip_test` |
-| MILo | `mesh_extract_sdf.py` |
-| 3DGS | 별도 open3d TSDF 후처리 |
-
----
-
-## 문제 이력 — real_test_combined_uniform 복원 중 발생 (2026-06-28)
-
-### 1. 데이터셋 비균일성 (근본 교체 사유)
-- **증상**: HTML 시각화에서 프레임 간격이 불규칙해 보임
-- **원인**: 이전 `real_test_3m/7m`는 웨이포인트 기반 비행 → 각도 간격 std=9.4° (14°~43°)
-- **조치**: 새 균일 데이터셋(`real_test_3m_uniform/7m_uniform`, std=1.5~2.5°) Google Drive에서 재다운로드, 기존 실험 전량 삭제
-
-### 2. venv-mast3r 경로 오류
-- **증상**: `source /home/sdh/venv-mast3r/bin/activate` → `No such file`
-- **원인**: 실제 경로는 `/home/sdh/Desktop/venvs/venv-mast3r/`
-- **조치**: 경로 수정
-
-### 3. MASt3R-SfM `--weights` 인자 누락
-- **증상**: `error: the following arguments are required: --weights`
-- **조치**: `--weights /home/sdh/Desktop/models/MAST3R_2/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth` 추가
-
-### 4. 합산 복원 시 7m ATE 악화 (inter-orbit scale mismatch)
-- **증상**: 3m+7m 합산 MASt3R-SfM에서 7m ATE=27.6cm (단독 2.03cm 대비 13.6× 악화)
-- **원인**: swin-5 그래프 경계(frame 12-16 ↔ frame 17)에서 cross-altitude feature matching 불충분 → 7m frame 0 이상치(103cm). 순서 바꿔도(7m 먼저) 동일하게 88cm 이상치 → 구조적 한계
-- **조치**: 합산 유지 (지형 커버리지 우선). per-group Umeyama로 평가.
-
-### 5. HTML 좌표계 틸트
-- **증상**: 시각화에서 궤적이 ~18° 기울어짐
-- **원인**: MASt3R world frame ≠ NED/ENU 정렬
-- **조치**: per-group Umeyama로 GT NED 정렬 후 NED→ENU 변환 (`ned2enu = [y, x, -z]`)
-
-### 6. conda 환경 이중 설치 혼란 (sysai3)
-- **증상**: `conda activate gs2m` → `EnvironmentNameNotFound`
-- **원인**: sysai3에 conda 두 곳: `~/miniconda3/` (MonoGS만 있음) vs `~/miniforge3/` (gs2m, gs3d, mast3r310, milo 등 전부)
-- **조치**: GPU ML 환경은 모두 `source /home/sdh/miniforge3/bin/activate <env>` 사용
-
-### 7. 3DGS `diff_gaussian_rasterization` 패키지 미발견
-- **증상**: `gs_env`에서 import error
-- **원인**: `gs_env`에 바닐라 3DGS 설치 안 됨
-- **조치**: `miniforge3/envs/gs3d` 사용
-
-### 8. MILo `FileNotFoundError: ./configs/fast`
-- **증상**: `python3 /home/sdh/Desktop/models/milo/train.py` 실행 시 config 파일 못 찾음
-- **원인**: config 경로가 상대경로(`./configs/`) 기준 → working directory가 `milo/milo/`이어야 함
-- **조치**: `cd /home/sdh/Desktop/models/milo/milo/ && python3 train.py ...`
-
-### 9. combined 디렉토리에 68장 (old symlink 잔류)
-- **증상**: 34장이어야 할 `real_test_combined_uniform_rev/rgb/`에 68장 존재
-- **원인**: 이전 데이터 삭제 후 디렉토리 재생성 시 구 symlink 미정리
-- **조치**: `rm -rf real_test_combined_uniform_rev/` 후 재생성
-
----
-
-## 문제 이력 — real_test (구 데이터) 복원 중 발생
-
-### 10. 점군 outlier 문제 → SOR 실험 → 효과 없음 결론
-
-**배경**: MILo/AGS 등 직접-위상 방법에서 메시 가장자리 스파이크/잡음 심각.
-점군이 scene_extent의 4.9×까지 퍼진 것 확인 (COLMAP points3D full diag 15.84, scene_extent 1.99).
-
-**가설 검증:**
-- H1 스케일/좌표계 이상 → ❌ 기각 (scene_extent 정상 범위)
-- H2 low-confidence outlier → ✅ 핵심 원인으로 판단 → SOR 실험 진행
-
-**SOR 실험 경과:**
-
-| 단계 | 설정 | 보존율 | 결과 |
-|---|---|---|---|
-| SOR1 | nb=20, std=2.0 | 94.6% | 가장자리 스파이크 여전히 존재 |
-| SOR2 | nb=30, std=1.0 | 88.0% | MILo 재학습 → 수치 소폭 개선 |
-| SOR3 | nb=30, std=0.5 | 81.7% | `real_test_milo_sor2.ply` 완료 |
-
-**메시 품질 비교 (5개 큐브 GT 기준):**
-
-| 모델 | CD (cm) | F@10cm |
-|---|---|---|
-| MILo baseline | 37.20 | 0.018 |
-| MILo SOR2 (nb=30, std=0.5) | 30.72 | 0.024 |
-| 차이 | △-6.5cm | △+0.006 |
-
-**결론**: SOR로 floater 제거해도 CD 개선 미미, F-score 거의 변화 없음.
-**근본 원인은 outlier가 아니라 texture 부족** (단색 배경 + 큐브 → photometric gradient 없음).
-→ 알고리즘 튜닝으로는 해결 불가, 데이터 자체의 한계.
-
-### 11. GOF (Gaussian Opacity Fields) 메시 추출 hanging
-- **증상**: 학습 30k 완료 후 메시 추출 시 binary search step 7에서 멈춤, 무한대기
-- **원인**: unbounded 야외 씬에서 GOF binary search가 occupancy threshold 수렴 실패로 추정
-- **조치**: 타임아웃 후 포기, GOF 메시 결과 없음
-
-### 12. depth prior가 오히려 악화 (blue_1)
-- **증상**: `MILo+prior` CD=11.35cm > `MILo baseline` CD=9.40cm
-- **원인**: 단색 파란 박스에서 MASt3R depth map 자체가 노이즈 심함 → 잘못된 depth 정보가 학습 왜곡
-- **결론**: texture gradient 없는 씬에서 외부 depth supervision은 역효과. real_test에서도 prior 효과 미미 (21.44cm vs 21.54cm).
-
-### 13. 3m_1 focal 버그 (첫 번째 시도 전량 폐기)
-- **증상**: 학습 PSNR 16dB (정상 22dB+), 카메라가 어안렌즈처럼 동작
-- **원인**: MASt3R는 512px 기준으로 focal 저장 → COLMAP 변환 시 원본 해상도 스케일백 누락
-  - 잘못된 값: 359.88px (FOV 139°) → 올바른 값: `359.88 × (1920/512)` = **1349.55px** (FOV 71°)
-- **조치**: `build_colmap.py`에 `focal = focal_512 * (W / 512)` 수정, 실험 전량 재실행
-  - uniform 데이터에서는 focal=969.40px (`258.51 × 3.75`)
-
-### 14. AGS input `colmap/` 심링크 누락
-- **증상**: `"Could not recognize scene type!"` 오류
-- **원인**: AGS는 입력 디렉토리 안에 `colmap/` 심링크 필수
-- **조치**: `ln -s /path/to/colmap ./input_dir/colmap`
-
----
-
-## 현재 상태: 3m_1 전 모델 NVS + 메시 추출 완료 (2026-06-27)
-
-### 3m_1 NVS 결과 (test 7장, llffhold=8 → 48 train / 7 test, 2026-06-27 완료)
-
-**30k 기준 PSNR/SSIM/LPIPS 전체 비교**
-
-| 순위 | 모델 | PSNR↑ | SSIM↑ | LPIPS↓ | iter |
-|---|---|---|---|---|---|
-| PSNR 🥇 | **MILo** | **22.106** | 0.5853 | 0.3543 | 18k |
-| SSIM 🥇 | **3DGS+depth** | 21.900 | **0.5949** | **0.2641** | 30k |
-| LPIPS 🥇 | **3DGS+depth** | 21.900 | 0.5949 | **0.2641** | 30k |
-| — | GS-2M | 21.915 | 0.5889 | 0.2823 | 30k |
-| — | 2DGS | 21.906 | 0.5903 | 0.2741 | 30k |
-| — | 3DGS baseline | 21.811 | 0.5878 | 0.2642 | 30k |
-
-**best iter 기준 (peak PSNR)**
-
-| 모델 | best test PSNR | iter | 비고 |
-|---|---|---|---|
-| **3DGS+depth** | **22.23** | 7k | depth prior 효과 (7k peak, 이후 하락) |
-| **MILo** | **22.11** | 18k | 과적합 gap 최소 (1.7dB) |
-| GS-2M | 21.93 | 25k | 30k 소폭 하락 |
-| 3DGS | 22.07 | 7k | 30k 과적합 (gap 6.1dB) |
-| 2DGS | 21.91 | 30k | 수렴 안정 |
-
-**지표별 해석:**
-- **PSNR**: MILo 1위 — 픽셀 정확도 가장 높음
-- **SSIM/LPIPS**: 3DGS+depth 동시 1위 — 지각적 품질(텍스처·구조)은 depth prior Gaussian이 우수
-- 모든 모델 PSNR ~21.8~22.1dB 수렴 → 알고리즘 아닌 **데이터 천장**이 지배
-- depth prior: PSNR +0.09dB 미미, LPIPS −0.0001 미미하지만 **SSIM +0.007** 유의미
-
-### 3m_1 메시 추출 현황 (2026-06-27 완료)
-
-| 모델 | 메시 파일 | 크기 | 버텍스 수 | 방식 |
-|---|---|---|---|---|
-| ✅ MILo | `3m_1__mast3r__milo/mesh_learnable_sdf.ply` | 80MB | 2,003,258 | Learnable SDF |
-| ✅ GS-2M | `3m_1__mast3r__gs2m/train/ours_30000/mesh/tsdf_post.ply` | 27MB | 523,613 | TSDF fusion |
-| ✅ 2DGS | `3m_1__mast3r__2dgs/train/ours_30000/fuse_post.ply` | 33MB | 671,316 | TSDF fusion |
-| — | 3DGS / 3DGS+depth | — | — | point cloud만 (별도 TSDF 필요) |
-
-TSDF 파라미터 (GS-2M / 2DGS 공통): `voxel_size=0.01, depth_trunc=6.0, sdf_trunc=0.04, num_cluster=1`
-
-### 핵심 발견
-1. **모든 모델 ~21.8–22.2dB에 수렴** → 알고리즘 차이보다 **데이터 천장**이 지배
-2. 천장 원인 = **포즈 정확도(MASt3R 누적오차) + 잔디/야외 장면** (geometry가 아님)
-3. depth prior는 geometry만 제약 → +0.17dB로 천장 못 뚫음
-4. 3DGS는 자유도 높아 sparse view에서 과적합 (train-test gap 6.1dB)
-5. 천장 돌파 레버: **COLMAP BA 포즈 재정렬** > 프레임 조밀화(10→5)
-
-### MASt3R-SfM → 3DGS depth prior 파이프라인 (공식 경로, 신규 구축)
-- depth 추출: `gen_3m1_depth_maps.py` (버그 2개 수정: reshape, world→camera Z 변환). 출력 `3m_1__mast3r_depth/depth_maps/*.npy` (55장, 288×512, metric 1.4~4m)
-- 역깊이 PNG 변환: `/tmp/convert_depth_3dgs.py` → `depths_png/` + `sparse/0/depth_params.json`
-- **스케일 검증**: COLMAP/MASt3R 깊이 median 비율 **1.0019** (동일 metric 스케일 → scale=0.998 offset=0 직접 사용, make_depth_scale 불필요)
-- ⚠️ MASt3R COLMAP export에 2D-3D 대응점 없음 → make_depth_scale.py 사용 불가 (metric 일치로 우회)
-- 학습 env: `gs3d` (gs2m clone + 바닐라 diff-gaussian-rasterization/simple-knn/fused-ssim 설치). gs2m rasterizer는 GS-2M 커스텀(feature_count 필드)이라 바닐라 3DGS 비호환
-- 출력: `3m_1__mast3r__3dgs{,_depth}/point_cloud/iteration_{7000,30000}/`
-
-### 서버 경로 요약 (sysai3)
-```
-/home/sdh/Desktop/data/experiments/
-├── 3m_1__mast3r__milo/        mesh_learnable_sdf.ply (80MB)
-├── 3m_1__mast3r__gs2m/        train/ours_30000/mesh/tsdf_post.ply (27MB)
-├── 3m_1__mast3r__2dgs/        train/ours_30000/fuse_post.ply (33MB)
-├── 3m_1__mast3r__3dgs/        point_cloud/iteration_30000/point_cloud.ply (702MB)
-├── 3m_1__mast3r__3dgs_depth/  point_cloud/iteration_30000/point_cloud.ply (735MB)
-└── 3m_1__mast3r__colmap/      02_colmap/ (COLMAP 입력)
-```
-
-### 미완 / 다음
-- 메시 3개(MILo/GS-2M/2DGS) 로컬 다운로드 미완료
-- 5m_1, 7m_1 동일 파이프라인 미실행
-- COLMAP BA 포즈 재정렬 미시도
-
----
+# PART C. 구 데이터셋 (real_test / blue_1) — 초기 실험 아카이브
 
 ## real_test 결과 요약 (시뮬레이션, 34장, AirSim)
 
@@ -1568,19 +1723,46 @@ TSDF 파라미터 (GS-2M / 2DGS 공통): `voxel_size=0.01, depth_trunc=6.0, sdf_
 
 ---
 
-## (이전) 3m_1 평가 파이프라인 설계 완료 → 재실행 대기 (2026-06-25)
 
-- **완료**: `real_test__milo_sor2` — 18000 iter, `mesh_learnable_sdf.ply` (215MB)
-- **완료**: `blue_1__milo_fhd_prior` — 20MB PLY (depth prior 적용)
-- **완료**: 메시 정량 평가 (Chamfer Distance + F-score) — 모든 데이터셋에서 texture 부족이 병목
-- **보류**: `real_test__gof` — 메시 추출 hanging (binary search step 7 후 멈춤)
-- **완료 (2026-06-24)**: GS-2M (Eurographics 2026) 학습 + TSDF 메시 추출 — `/mnt/c/Users/sdh97/Desktop/3d_results/real_test/gs2m_output/`
-- **완료 (2026-06-24)**: 실제 드론 3개 고도 폴더 MASt3R-SfM — `sysai3:~/Desktop/data/drone_real_sfm/{3m_1,5m_1,7m_1}/`
-- **완료 (2026-06-24)**: GS-2M 메시 품질 정량 평가 (재평가, Umeyama 기반 COLMAP 공간 비교)
-- **❌ 취소**: 3m_1 첫 번째 학습 시도 (GS-2M/2DGS/MILo) — focal 버그로 전량 폐기
-- **⏳ 대기**: focal 수정 후 3m_1 재실행 (파이프라인 설계 완료)
+## real_test 메시 복원 실험 이력 (2026-06-21 완료)
+
+> 데이터: `~/Desktop/data/datasets/rgb/` (34장, 1920×1080, 시뮬레이션)
+> 공통 초기화: MASt3R-SfM 점군 1,490,920 pts (전부 동일 PLY 사용 확인)
+
+### Baseline (depth/normal supervision 미적용)
+
+| 방법 | 결과 | 출력 | 로컬 다운로드 |
+|---|---|---|---|
+| 2DGS (baseline) | ✅ 완료 | `real_test__mast3r__2dgs/.../fuse_post.ply` 6.4M V | `C:\Users\sdh97\Desktop\real_test_2dgs_fuse_post.ply` (315MB) |
+| MILo (baseline) | ✅ 완료 | `real_test__milo/mesh_learnable_sdf.ply` | `C:\Users\sdh97\Desktop\real_test_milo.ply` (288MB) |
+| AGS-Mesh (baseline) | ✅ 완료 | `real_test__ags_mesh_output/.../fuse_post.ply` 3.5M V | `C:\Users\sdh97\Desktop\real_test_ags_fuse_post.ply` (165MB) |
+
+### Prior 버전 (MASt3R depth map supervision 적용)
+
+| 방법 | 결과 | 출력 | 평가 |
+|---|---|---|---|
+| MILo + MASt3R depth prior | ✅ 완료 | `real_test__milo_prior/mesh_learnable_sdf.ply` | `C:\Users\sdh97\Desktop\real_test_milo_prior.ply` (268MB) — **전체 형상 양호, 잡음 많음** |
+| AGS-Mesh + MASt3R depth prior | ✅ 완료 | `real_test__ags_prior_output/.../fuse_post.ply` 3.1M V | `C:\Users\sdh97\Desktop\real_test_ags_prior_fuse_post.ply` (152MB) — **평가 필요** |
+
+### Prior 구현 내역
+
+- MASt3R depth maps: `~/Desktop/data/experiments/real_test__mast3r_depth/depth_maps/` (`.npy`, float32, m)
+- **MILo 패치** (`~/Desktop/milo/milo/regularization/regularizer/depth_order.py`):
+  - `initialize_depth_order_supervision()` 상단에 MASt3R `.npy` 로딩 경로 추가
+  - config key `mast3r_depth_dir` 존재 시 `.npy` 로드 후 [0,1] 정규화 → depth order supervision에 사용
+  - 없으면 기존 DepthAnythingV2 경로 fallback
+- **MILo config** (`~/Desktop/milo/milo/configs/depth_order/mast3r_depth.yaml`):
+  - `mast3r_depth_dir: '/home/sdh/Desktop/data/experiments/real_test__mast3r_depth/depth_maps'`
+  - `weight_update_iters: [600, 1500, 3000, 8000, 13000]` / `weight_update_values: [1, 0.1, 0.01, 0.001, 0.0001]`
+- **AGS-Mesh**: MASt3R `.npy` → uint16 PNG (mm) 변환 후 `--depth_supervision`, TSDF `voxel_size=0.004 sdf_trunc=0.02`
+
+### 주의사항 (재실행 시 참고)
+- AGS input 디렉토리는 `colmap/` 심링크 필수 (없으면 "Could not recognize scene type!" 에러)
+- MASt3R depth format: `.npy` float32 meters. AGS는 uint16 PNG mm 필요 → `(depth * 1000).astype(np.uint16)`
+- AGS normal: dummy flat (2DGS normal 저장이 주석처리됨, `utils/mesh_utils.py:294`)
 
 ---
+
 
 ## outlier 제거 실험 (2026-06-22 착수)
 
@@ -1661,6 +1843,7 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 
 ---
 
+
 ## 메시 품질 정량 평가 (2026-06-24)
 
 ### 평가 방법
@@ -1709,6 +1892,7 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 
 ---
 
+
 ## 포즈 정확도 비교 — GT vs MASt3R-SfM (2026-06-23)
 
 ### 데이터
@@ -1735,52 +1919,105 @@ bbox crop은 주변 환경(지면)까지 잘릴 수 있어 제외. SOR은 공간
 
 ---
 
-## real_test 메시 복원 실험 이력 (2026-06-21 완료)
 
-> 데이터: `~/Desktop/data/datasets/rgb/` (34장, 1920×1080, 시뮬레이션)
-> 공통 초기화: MASt3R-SfM 점군 1,490,920 pts (전부 동일 PLY 사용 확인)
+## 3m_1 평가 파이프라인 설계 — 이전 버전 (2026-06-25)
 
-### Baseline (depth/normal supervision 미적용)
-
-| 방법 | 결과 | 출력 | 로컬 다운로드 |
-|---|---|---|---|
-| 2DGS (baseline) | ✅ 완료 | `real_test__mast3r__2dgs/.../fuse_post.ply` 6.4M V | `C:\Users\sdh97\Desktop\real_test_2dgs_fuse_post.ply` (315MB) |
-| MILo (baseline) | ✅ 완료 | `real_test__milo/mesh_learnable_sdf.ply` | `C:\Users\sdh97\Desktop\real_test_milo.ply` (288MB) |
-| AGS-Mesh (baseline) | ✅ 완료 | `real_test__ags_mesh_output/.../fuse_post.ply` 3.5M V | `C:\Users\sdh97\Desktop\real_test_ags_fuse_post.ply` (165MB) |
-
-### Prior 버전 (MASt3R depth map supervision 적용)
-
-| 방법 | 결과 | 출력 | 평가 |
-|---|---|---|---|
-| MILo + MASt3R depth prior | ✅ 완료 | `real_test__milo_prior/mesh_learnable_sdf.ply` | `C:\Users\sdh97\Desktop\real_test_milo_prior.ply` (268MB) — **전체 형상 양호, 잡음 많음** |
-| AGS-Mesh + MASt3R depth prior | ✅ 완료 | `real_test__ags_prior_output/.../fuse_post.ply` 3.1M V | `C:\Users\sdh97\Desktop\real_test_ags_prior_fuse_post.ply` (152MB) — **평가 필요** |
-
-### Prior 구현 내역
-
-- MASt3R depth maps: `~/Desktop/data/experiments/real_test__mast3r_depth/depth_maps/` (`.npy`, float32, m)
-- **MILo 패치** (`~/Desktop/milo/milo/regularization/regularizer/depth_order.py`):
-  - `initialize_depth_order_supervision()` 상단에 MASt3R `.npy` 로딩 경로 추가
-  - config key `mast3r_depth_dir` 존재 시 `.npy` 로드 후 [0,1] 정규화 → depth order supervision에 사용
-  - 없으면 기존 DepthAnythingV2 경로 fallback
-- **MILo config** (`~/Desktop/milo/milo/configs/depth_order/mast3r_depth.yaml`):
-  - `mast3r_depth_dir: '/home/sdh/Desktop/data/experiments/real_test__mast3r_depth/depth_maps'`
-  - `weight_update_iters: [600, 1500, 3000, 8000, 13000]` / `weight_update_values: [1, 0.1, 0.01, 0.001, 0.0001]`
-- **AGS-Mesh**: MASt3R `.npy` → uint16 PNG (mm) 변환 후 `--depth_supervision`, TSDF `voxel_size=0.004 sdf_trunc=0.02`
-
-### 주의사항 (재실행 시 참고)
-- AGS input 디렉토리는 `colmap/` 심링크 필수 (없으면 "Could not recognize scene type!" 에러)
-- MASt3R depth format: `.npy` float32 meters. AGS는 uint16 PNG mm 필요 → `(depth * 1000).astype(np.uint16)`
-- AGS normal: dummy flat (2DGS normal 저장이 주석처리됨, `utils/mesh_utils.py:294`)
+- **완료**: `real_test__milo_sor2` — 18000 iter, `mesh_learnable_sdf.ply` (215MB)
+- **완료**: `blue_1__milo_fhd_prior` — 20MB PLY (depth prior 적용)
+- **완료**: 메시 정량 평가 (Chamfer Distance + F-score) — 모든 데이터셋에서 texture 부족이 병목
+- **보류**: `real_test__gof` — 메시 추출 hanging (binary search step 7 후 멈춤)
+- **완료 (2026-06-24)**: GS-2M (Eurographics 2026) 학습 + TSDF 메시 추출 — `/mnt/c/Users/sdh97/Desktop/3d_results/real_test/gs2m_output/`
+- **완료 (2026-06-24)**: 실제 드론 3개 고도 폴더 MASt3R-SfM — `sysai3:~/Desktop/data/drone_real_sfm/{3m_1,5m_1,7m_1}/`
+- **완료 (2026-06-24)**: GS-2M 메시 품질 정량 평가 (재평가, Umeyama 기반 COLMAP 공간 비교)
+- **❌ 취소**: 3m_1 첫 번째 학습 시도 (GS-2M/2DGS/MILo) — focal 버그로 전량 폐기
+- **⏳ 대기**: focal 수정 후 3m_1 재실행 (파이프라인 설계 완료)
 
 ---
 
-## blue_1 현재 상태: 막힘
+
+## 현재 상태: 3m_1 전 모델 NVS + 메시 추출 완료 (2026-06-27)
+
+### 3m_1 NVS 결과 (test 7장, llffhold=8 → 48 train / 7 test, 2026-06-27 완료)
+
+**30k 기준 PSNR/SSIM/LPIPS 전체 비교**
+
+| 순위 | 모델 | PSNR↑ | SSIM↑ | LPIPS↓ | iter |
+|---|---|---|---|---|---|
+| PSNR 🥇 | **MILo** | **22.106** | 0.5853 | 0.3543 | 18k |
+| SSIM 🥇 | **3DGS+depth** | 21.900 | **0.5949** | **0.2641** | 30k |
+| LPIPS 🥇 | **3DGS+depth** | 21.900 | 0.5949 | **0.2641** | 30k |
+| — | GS-2M | 21.915 | 0.5889 | 0.2823 | 30k |
+| — | 2DGS | 21.906 | 0.5903 | 0.2741 | 30k |
+| — | 3DGS baseline | 21.811 | 0.5878 | 0.2642 | 30k |
+
+**best iter 기준 (peak PSNR)**
+
+| 모델 | best test PSNR | iter | 비고 |
+|---|---|---|---|
+| **3DGS+depth** | **22.23** | 7k | depth prior 효과 (7k peak, 이후 하락) |
+| **MILo** | **22.11** | 18k | 과적합 gap 최소 (1.7dB) |
+| GS-2M | 21.93 | 25k | 30k 소폭 하락 |
+| 3DGS | 22.07 | 7k | 30k 과적합 (gap 6.1dB) |
+| 2DGS | 21.91 | 30k | 수렴 안정 |
+
+**지표별 해석:**
+- **PSNR**: MILo 1위 — 픽셀 정확도 가장 높음
+- **SSIM/LPIPS**: 3DGS+depth 동시 1위 — 지각적 품질(텍스처·구조)은 depth prior Gaussian이 우수
+- 모든 모델 PSNR ~21.8~22.1dB 수렴 → 알고리즘 아닌 **데이터 천장**이 지배
+- depth prior: PSNR +0.09dB 미미, LPIPS −0.0001 미미하지만 **SSIM +0.007** 유의미
+
+### 3m_1 메시 추출 현황 (2026-06-27 완료)
+
+| 모델 | 메시 파일 | 크기 | 버텍스 수 | 방식 |
+|---|---|---|---|---|
+| ✅ MILo | `3m_1__mast3r__milo/mesh_learnable_sdf.ply` | 80MB | 2,003,258 | Learnable SDF |
+| ✅ GS-2M | `3m_1__mast3r__gs2m/train/ours_30000/mesh/tsdf_post.ply` | 27MB | 523,613 | TSDF fusion |
+| ✅ 2DGS | `3m_1__mast3r__2dgs/train/ours_30000/fuse_post.ply` | 33MB | 671,316 | TSDF fusion |
+| — | 3DGS / 3DGS+depth | — | — | point cloud만 (별도 TSDF 필요) |
+
+TSDF 파라미터 (GS-2M / 2DGS 공통): `voxel_size=0.01, depth_trunc=6.0, sdf_trunc=0.04, num_cluster=1`
+
+### 핵심 발견
+1. **모든 모델 ~21.8–22.2dB에 수렴** → 알고리즘 차이보다 **데이터 천장**이 지배
+2. 천장 원인 = **포즈 정확도(MASt3R 누적오차) + 잔디/야외 장면** (geometry가 아님)
+3. depth prior는 geometry만 제약 → +0.17dB로 천장 못 뚫음
+4. 3DGS는 자유도 높아 sparse view에서 과적합 (train-test gap 6.1dB)
+5. 천장 돌파 레버: **COLMAP BA 포즈 재정렬** > 프레임 조밀화(10→5)
+
+### MASt3R-SfM → 3DGS depth prior 파이프라인 (공식 경로, 신규 구축)
+- depth 추출: `gen_3m1_depth_maps.py` (버그 2개 수정: reshape, world→camera Z 변환). 출력 `3m_1__mast3r_depth/depth_maps/*.npy` (55장, 288×512, metric 1.4~4m)
+- 역깊이 PNG 변환: `/tmp/convert_depth_3dgs.py` → `depths_png/` + `sparse/0/depth_params.json`
+- **스케일 검증**: COLMAP/MASt3R 깊이 median 비율 **1.0019** (동일 metric 스케일 → scale=0.998 offset=0 직접 사용, make_depth_scale 불필요)
+- ⚠️ MASt3R COLMAP export에 2D-3D 대응점 없음 → make_depth_scale.py 사용 불가 (metric 일치로 우회)
+- 학습 env: `gs3d` (gs2m clone + 바닐라 diff-gaussian-rasterization/simple-knn/fused-ssim 설치). gs2m rasterizer는 GS-2M 커스텀(feature_count 필드)이라 바닐라 3DGS 비호환
+- 출력: `3m_1__mast3r__3dgs{,_depth}/point_cloud/iteration_{7000,30000}/`
+
+### 서버 경로 요약 (sysai3)
+```
+/home/sdh/Desktop/data/experiments/
+├── 3m_1__mast3r__milo/        mesh_learnable_sdf.ply (80MB)
+├── 3m_1__mast3r__gs2m/        train/ours_30000/mesh/tsdf_post.ply (27MB)
+├── 3m_1__mast3r__2dgs/        train/ours_30000/fuse_post.ply (33MB)
+├── 3m_1__mast3r__3dgs/        point_cloud/iteration_30000/point_cloud.ply (702MB)
+├── 3m_1__mast3r__3dgs_depth/  point_cloud/iteration_30000/point_cloud.ply (735MB)
+└── 3m_1__mast3r__colmap/      02_colmap/ (COLMAP 입력)
+```
+
+### 미완 / 다음
+- 메시 3개(MILo/GS-2M/2DGS) 로컬 다운로드 미완료
+- 5m_1, 7m_1 동일 파이프라인 미실행
+- COLMAP BA 포즈 재정렬 미시도
+
+---
+
+
+## blue_1 실험 이력 (초기 시뮬 데이터, 막힘 → 아카이브)
 
 단색 파란 박스 → 모든 접근법 실패. 근본 원인은 아래 참조.
 
 ---
 
-## 근본 실패 구조
+### 근본 실패 구조
 
 ```
 단색 파란 박스 → texture gradient 없음
@@ -1793,7 +2030,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
-## blue_1 메시 복원 실험 이력
+### blue_1 메시 복원 실험 이력
 
 | 방법 | 결과 | 실패 원인 |
 |---|---|---|
@@ -1822,7 +2059,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
-## 남은 선택지
+### 남은 선택지
 
 | 방법 | 설명 | 가능성 |
 |---|---|---|
@@ -1832,7 +2069,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
-## AGS-Mesh-2dgs 결과 (참고용)
+### AGS-Mesh-2dgs 결과 (참고용)
 
 - 학습: 30000 iter 완료 (2026-06-20 00:00 KST)
 - 메시: `~/Desktop/data/experiments/blue_1__ags_mesh_output/train/ours_30000/fuse_post.ply`
@@ -1848,7 +2085,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
-## MASt3R direct TSDF 결과 (참고용)
+### MASt3R direct TSDF 결과 (참고용)
 
 - 스크립트: `~/Desktop/mast3r_tsdf_fusion.py`
 - 결과: `~/Desktop/mast3r_tsdf_mesh.ply` (1.2GB), 클리닝 후 `mast3r_tsdf_clean.ply`
@@ -1856,6 +2093,120 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 - 파라미터: voxel=1cm, sdf_trunc=5cm, 125장 fusion
 
 ---
+
+
+---
+
+# PART D. 문제 이력 (트러블슈팅 아카이브)
+
+## 문제 이력 — real_test_combined_uniform 복원 중 발생 (2026-06-28)
+
+### 1. 데이터셋 비균일성 (근본 교체 사유)
+- **증상**: HTML 시각화에서 프레임 간격이 불규칙해 보임
+- **원인**: 이전 `real_test_3m/7m`는 웨이포인트 기반 비행 → 각도 간격 std=9.4° (14°~43°)
+- **조치**: 새 균일 데이터셋(`real_test_3m_uniform/7m_uniform`, std=1.5~2.5°) Google Drive에서 재다운로드, 기존 실험 전량 삭제
+
+### 2. venv-mast3r 경로 오류
+- **증상**: `source /home/sdh/venv-mast3r/bin/activate` → `No such file`
+- **원인**: 실제 경로는 `/home/sdh/Desktop/venvs/venv-mast3r/`
+- **조치**: 경로 수정
+
+### 3. MASt3R-SfM `--weights` 인자 누락
+- **증상**: `error: the following arguments are required: --weights`
+- **조치**: `--weights /home/sdh/Desktop/models/MAST3R_2/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth` 추가
+
+### 4. 합산 복원 시 7m ATE 악화 (inter-orbit scale mismatch)
+- **증상**: 3m+7m 합산 MASt3R-SfM에서 7m ATE=27.6cm (단독 2.03cm 대비 13.6× 악화)
+- **원인**: swin-5 그래프 경계(frame 12-16 ↔ frame 17)에서 cross-altitude feature matching 불충분 → 7m frame 0 이상치(103cm). 순서 바꿔도(7m 먼저) 동일하게 88cm 이상치 → 구조적 한계
+- **조치**: 합산 유지 (지형 커버리지 우선). per-group Umeyama로 평가.
+
+### 5. HTML 좌표계 틸트
+- **증상**: 시각화에서 궤적이 ~18° 기울어짐
+- **원인**: MASt3R world frame ≠ NED/ENU 정렬
+- **조치**: per-group Umeyama로 GT NED 정렬 후 NED→ENU 변환 (`ned2enu = [y, x, -z]`)
+
+### 6. conda 환경 이중 설치 혼란 (sysai3)
+- **증상**: `conda activate gs2m` → `EnvironmentNameNotFound`
+- **원인**: sysai3에 conda 두 곳: `~/miniconda3/` (MonoGS만 있음) vs `~/miniforge3/` (gs2m, gs3d, mast3r310, milo 등 전부)
+- **조치**: GPU ML 환경은 모두 `source /home/sdh/miniforge3/bin/activate <env>` 사용
+
+### 7. 3DGS `diff_gaussian_rasterization` 패키지 미발견
+- **증상**: `gs_env`에서 import error
+- **원인**: `gs_env`에 바닐라 3DGS 설치 안 됨
+- **조치**: `miniforge3/envs/gs3d` 사용
+
+### 8. MILo `FileNotFoundError: ./configs/fast`
+- **증상**: `python3 /home/sdh/Desktop/models/milo/train.py` 실행 시 config 파일 못 찾음
+- **원인**: config 경로가 상대경로(`./configs/`) 기준 → working directory가 `milo/milo/`이어야 함
+- **조치**: `cd /home/sdh/Desktop/models/milo/milo/ && python3 train.py ...`
+
+### 9. combined 디렉토리에 68장 (old symlink 잔류)
+- **증상**: 34장이어야 할 `real_test_combined_uniform_rev/rgb/`에 68장 존재
+- **원인**: 이전 데이터 삭제 후 디렉토리 재생성 시 구 symlink 미정리
+- **조치**: `rm -rf real_test_combined_uniform_rev/` 후 재생성
+
+---
+
+
+## 문제 이력 — real_test (구 데이터) 복원 중 발생
+
+### 10. 점군 outlier 문제 → SOR 실험 → 효과 없음 결론
+
+**배경**: MILo/AGS 등 직접-위상 방법에서 메시 가장자리 스파이크/잡음 심각.
+점군이 scene_extent의 4.9×까지 퍼진 것 확인 (COLMAP points3D full diag 15.84, scene_extent 1.99).
+
+**가설 검증:**
+- H1 스케일/좌표계 이상 → ❌ 기각 (scene_extent 정상 범위)
+- H2 low-confidence outlier → ✅ 핵심 원인으로 판단 → SOR 실험 진행
+
+**SOR 실험 경과:**
+
+| 단계 | 설정 | 보존율 | 결과 |
+|---|---|---|---|
+| SOR1 | nb=20, std=2.0 | 94.6% | 가장자리 스파이크 여전히 존재 |
+| SOR2 | nb=30, std=1.0 | 88.0% | MILo 재학습 → 수치 소폭 개선 |
+| SOR3 | nb=30, std=0.5 | 81.7% | `real_test_milo_sor2.ply` 완료 |
+
+**메시 품질 비교 (5개 큐브 GT 기준):**
+
+| 모델 | CD (cm) | F@10cm |
+|---|---|---|
+| MILo baseline | 37.20 | 0.018 |
+| MILo SOR2 (nb=30, std=0.5) | 30.72 | 0.024 |
+| 차이 | △-6.5cm | △+0.006 |
+
+**결론**: SOR로 floater 제거해도 CD 개선 미미, F-score 거의 변화 없음.
+**근본 원인은 outlier가 아니라 texture 부족** (단색 배경 + 큐브 → photometric gradient 없음).
+→ 알고리즘 튜닝으로는 해결 불가, 데이터 자체의 한계.
+
+### 11. GOF (Gaussian Opacity Fields) 메시 추출 hanging
+- **증상**: 학습 30k 완료 후 메시 추출 시 binary search step 7에서 멈춤, 무한대기
+- **원인**: unbounded 야외 씬에서 GOF binary search가 occupancy threshold 수렴 실패로 추정
+- **조치**: 타임아웃 후 포기, GOF 메시 결과 없음
+
+### 12. depth prior가 오히려 악화 (blue_1)
+- **증상**: `MILo+prior` CD=11.35cm > `MILo baseline` CD=9.40cm
+- **원인**: 단색 파란 박스에서 MASt3R depth map 자체가 노이즈 심함 → 잘못된 depth 정보가 학습 왜곡
+- **결론**: texture gradient 없는 씬에서 외부 depth supervision은 역효과. real_test에서도 prior 효과 미미 (21.44cm vs 21.54cm).
+
+### 13. 3m_1 focal 버그 (첫 번째 시도 전량 폐기)
+- **증상**: 학습 PSNR 16dB (정상 22dB+), 카메라가 어안렌즈처럼 동작
+- **원인**: MASt3R는 512px 기준으로 focal 저장 → COLMAP 변환 시 원본 해상도 스케일백 누락
+  - 잘못된 값: 359.88px (FOV 139°) → 올바른 값: `359.88 × (1920/512)` = **1349.55px** (FOV 71°)
+- **조치**: `build_colmap.py`에 `focal = focal_512 * (W / 512)` 수정, 실험 전량 재실행
+  - uniform 데이터에서는 focal=969.40px (`258.51 × 3.75`)
+
+### 14. AGS input `colmap/` 심링크 누락
+- **증상**: `"Could not recognize scene type!"` 오류
+- **원인**: AGS는 입력 디렉토리 안에 `colmap/` 심링크 필수
+- **조치**: `ln -s /path/to/colmap ./input_dir/colmap`
+
+---
+
+
+---
+
+# PART E. 환경 / 유틸리티 / 데이터셋 (참고)
 
 ## 완료된 환경
 
@@ -1874,6 +2225,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
+
 ## 유틸리티 스크립트
 
 | 스크립트 | 위치 | 용도 |
@@ -1889,6 +2241,7 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
+
 ## 데이터셋
 
 | 객체 | 장수 | 상태 |
@@ -1900,306 +2253,3 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
-## 실제 드론 촬영 데이터 (2026-06-24 추가)
-
-- **출처**: 실제 드론으로 촬영한 영상 프레임 (시뮬레이션 아님)
-- **Google Drive**: https://drive.google.com/file/d/1y_HwAsE0eA3lCimyzNVqh3dLiGPdrs-e/view?usp=sharing
-- **파일**: ZIP (197MB), 총 1,656장 JPG
-- **로컬**: `C:\Users\sdh97\Desktop\drone_images\{3m_1,5m_1,7m_1}\`
-
-| 폴더 | 장수 | 설명 |
-|---|---|---|
-| `3m_1` | 547장 | 고도 3m 촬영 |
-| `5m_1` | 544장 | 고도 5m 촬영 |
-| `7m_1` | 565장 | 고도 7m 촬영 |
-
-- **비고**: 기존 STATUS.md의 `real_test` 항목에 "시뮬레이션"으로 잘못 기재된 부분 있음. real_test 34장도 실제 드론 촬영 데이터임.
-
-### 드론 영상 MASt3R-SfM 결과 (2026-06-24 완료)
-
-- **서버**: sysai3, 환경 `venv-mast3r`, 스크립트 `~/Desktop/run_drone_mast3r.sh`
-- **설정**: scene_graph=swin winsize=5, 10프레임마다 1장 샘플링 (~55장/폴더), shared_intrinsics
-
-| 폴더 | 입력 장수 | 출력 | 경로 |
-|---|---|---|---|
-| `3m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/3m_1/` |
-| `5m_1` | 55장 | poses.npy (55,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/5m_1/` |
-| `7m_1` | 57장 | poses.npy (57,4,4), focals.npy, pointcloud.ply | `~/Desktop/data/drone_real_sfm/7m_1/` |
-
----
-
-## GS-2M (Eurographics 2026) 학습 + 평가 (2026-06-24)
-
-### 학습 정보
-
-- **입력**: `real_test` 데이터 (34장, 1920×1080), COLMAP 초기화
-- **모델**: GS-2M — material-aware Gaussian Splatting + TSDF mesh extraction
-- **환경**: `conda gs2m` (GCC11, CUDA11.8, NumPy<2)
-- **출력 디렉토리**: `C:\Users\sdh97\Desktop\3d_results\real_test\gs2m_output\`
-
-| 항목 | 값 |
-|---|---|
-| 학습 iter | 30,000 |
-| L1 loss (최종) | 0.0199 |
-| PSNR (최종) | 31.21 dB |
-| TSDF 메시 | `train/ours_30000/mesh/tsdf_post.ply` ✅ |
-
-### 메시 품질 평가 (재평가, Umeyama 카메라 포즈 정렬 기반)
-
-> **평가 방법**: Umeyama 변환 (카메라 포즈 기반, scale=3.89×, ATE=2.3cm) → GT 큐브를 COLMAP 공간으로 역변환 → COLMAP 공간에서 직접 CD/F-score 계산
->
-> **GT**: UE5 Cube8~12.ply (5개 큐브, X=1.235~1.587 COLMAP units)
->
-> **참고**: 이전 평가(21-24cm)는 스크립트 미확인으로 재현 불가. 아래는 동일 방법으로 전 방법 재평가한 공정 비교임.
-
-| 방법 | CD (cm) | F@1cm | F@5cm | F@10cm | 비고 |
-|---|---|---|---|---|---|
-| AGS baseline | **25.41** | 0.019 | 0.057 | **0.127** | ✅ CD 최저 |
-| **GS-2M (ours)** | **27.79** | 0.004 | 0.029 | 0.057 | ← **NEW** |
-| MILo SOR2 | 30.72 | 0.003 | 0.013 | 0.024 | — |
-| MILo baseline | 37.20 | 0.003 | 0.010 | 0.018 | — |
-| 2DGS | 37.25 | 0.003 | 0.019 | 0.036 | — |
-
-> **해석**: CD 기준으로 GS-2M은 MILo/2DGS 대비 25-27% 개선. 5개 큐브 전체 씬에서 CD가 높은 것은 전체 씬 메시를 GT 소형 큐브와 비교하기 때문 (대부분의 메시 포인트가 큐브 표면과 거리가 멈).
-
-### 스크립트
-
-- **학습**: `/tmp/GS-2M/train.py` — `source ~/miniconda3/bin/activate gs2m && export CC=~/miniconda3/envs/gs2m/bin/gcc ...`
-- **메시 추출**: `/tmp/GS-2M/render.py --extract_mesh --skip_test`
-- **평가**: `/tmp/eval_gs2m.py` (Umeyama + COLMAP 공간 CD/F-score)
-
----
-
-## 3m_1 드론 데이터 평가 파이프라인 설계 (2026-06-25 확정)
-
-### 목적
-실제 드론 촬영 데이터(GT 없음) → GS-2M / 2DGS / MILo 3모델 비교
-- **정량**: PSNR / SSIM / LPIPS (NVS, held-out test views)
-- **정성**: 메시 추출 후 시각 비교 (GT 없으므로 CD 불가)
-
-### ❌ 첫 번째 시도 폐기 사유: focal 버그
-
-MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그 해상도 기준으로 저장.
-변환 스크립트에서 원본 해상도(1920)로 스케일백을 누락.
-
-| 항목 | 잘못된 값 | 올바른 값 |
-|------|----------|----------|
-| MASt3R 처리 해상도 | 512×288 | — |
-| 저장된 focal | 359.88px | — |
-| 스케일 팩터 | 누락 | 1920/512 = **×3.75** |
-| 1920px 기준 focal | ❌ 359.88 (FOV 139°) | ✅ **1349.55** (FOV 71°) |
-
-→ 카메라가 사실상 어안렌즈로 설정되어 학습 → PSNR 16dB (정상 22dB+)
-
-### 데이터 준비 (재실행 필요)
-
-- **소스**: sysai3 `~/Desktop/data/drone_real/3m_1/` (55장, 매 10프레임)
-- **포즈**: `drone_real_sfm/3m_1/poses.npy` (55,4,4) c2w
-- **COLMAP 변환 수정 사항**:
-  - `focal = focals_npy[0] * (1920 / 512)` = **1349.55px**
-  - cx=960, cy=540 (변경 없음)
-  - images.txt: poses.npy 순서 = 이미지 정렬 순서 ✅ 확인됨
-  - points3D.ply: 200k 다운샘플 (0pt 버그 수정 유지)
-
-### 학습 설정 (확정)
-
-| 항목 | 설정 | 비고 |
-|------|------|------|
-| 해상도 | **1920×1080** (코드 패치 필요) | `camera_utils.py` 1600 캡 제거 |
-| eval | `--eval` (llffhold=8) | 7장 held-out test |
-| iter | GS-2M/2DGS: 30k, MILo: 18k | 각자 수렴 스케줄 |
-| points3D | 200k 다운샘플 PLY | |
-
-> ⚠️ **1920 코드 패치**: GS-2M/2DGS/MILo 모두 `utils/camera_utils.py`에 `if orig_w > 1600: rescale` 하드코딩됨
-> → 각 모델의 `camera_utils.py`에서 해당 분기 제거 또는 1920으로 임계값 상향 필요
-
-### 평가 파이프라인 (3단계)
-
-```
-1. train.py --eval        → 학습 + PSNR 출력 (train 로그에서)
-2. render.py              → test 뷰 렌더링
-3. metrics.py             → SSIM / LPIPS 계산
-```
-
-> ⚠️ SSIM/LPIPS는 train 로그에 **안 나옴** — 반드시 render→metrics 실행 필요
-
-### 메시 추출 방식 (모델별 상이, 정상)
-
-| 모델 | 방식 | 실행 |
-|------|------|------|
-| GS-2M | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --extract_mesh` |
-| 2DGS | depth 렌더 → TSDF fusion → Marching Cubes | `render.py --mesh` |
-| MILo | 학습된 occupancy/SDF → Marching Tetrahedra | `mesh_extract_sdf.py` |
-
-> TSDF `voxel_size = max_depth/1024`, `sdf_trunc = 4×voxel` — 씬 스케일 자동 적응 (수동 튜닝 불필요)
-
-### NVS 결과 (실행 후 업데이트 예정)
-
-| 방법 | iter | PSNR (dB) | SSIM | LPIPS | 메시 |
-|------|------|-----------|------|-------|------|
-| GS-2M | 30k | - | - | - | TSDF |
-| 2DGS | 30k | - | - | - | TSDF |
-| MILo | 18k | - | - | - | SDF |
-
----
-
-## 10. AirSim GPS 오차 시뮬레이션 & Waypoint 개수 결정 (2026-07-09)
-
-### 목적
-
-실제 드론 촬영 계획(waypoint 개수, 반경)을 정하기 전에, GPS 오차가 실제 비행경로/waypoint 도달 오차에 얼마나 영향을 주는지 AirSim 시뮬레이션으로 먼저 정량화. 그 결과를 바탕으로 MASt3R-SfM 입력용 waypoint 개수(사진 장수)를 공학적으로 결정하고, 실제 촬영 스크립트를 준비.
-
-### GPS 오차 모델 (Cosys-AirSim estimator, 신규 구현)
-
-| 항목 | 값/방식 |
-|---|---|
-| 대상 하드웨어 | u-blox MAX-M10S (M10050) |
-| 수평 오차 | 1.5m CEP (데이터시트) |
-| 수직 오차 | 2.5m LEP (스펙 미기재, 수평의 ~1.7배로 가정) |
-| 갱신율 | 10Hz, latency 0.1s |
-| TTFF | 26s (cold start; 이 구간 동안 GPS 출력 자체가 없음 → 스폰 위치 고정) |
-| 오차 구조 | Gauss-Markov 바이어스(분산 90%, τ=60s) + 백색잡음(10%) — PX4 SITL `gazebo_gps_plugin`과 동일 계열 |
-| Heading 오차 | QMC5883L급, 2° 표류 바이어스(τ=120s) |
-| 제어 반영 | 저역통과(시상수 5s) 필터 — 빠른 백색잡음은 걸러내되 느린 바이어스는 실제 제어용 위치추정(estimator)에 통과시켜, 실비행처럼 GPS 오차가 궤적에 흔들림으로 나타나게 함 |
-
-- 파일: `Plugins/AirSim/Source/AirLib/include/vehicles/multirotor/firmwares/simple_flight/AirSimSimpleFlightEstimatorGps.hpp` (신규 파일, 원본 estimator는 미수정)
-- 배선: `SimpleFlightApi.hpp`에서 GPS 센서 참조 3줄만 추가
-- settings.json 프리셋 (`D:\UE_5.4\Engine\Binaries\Win64\`): `settings_disturbed.json`(바람 3m/s + GPS 오차, 현재 활성), `settings_baseline.json`(외란 없음, ablation 기준경로용)
-
-> ⚠️ **시행착오**: 첫 시도는 완벽한 ground-truth 속도로 dead-reckoning + 분산기반 칼만게인 조합 → 관성이 완벽하다고 가정되어 GPS를 0.0015%만 반영, 오차가 사실상 사라짐(truth-est 간극 2.4cm). 시상수 고정 저역통과 필터로 교체 후 간극 평균 2.5m(≈GPS CEP 스케일)로 정상화 확인.
-
-### Waypoint 개수 결정 — 기하 오차 vs GPS 오차 균형
-
-원을 n개 점으로 근사할 때 코너커팅(기하) 오차 ≈ R(1-cos(π/n)). R=15m 기준:
-
-| n | 기하 오차 | 판단 |
-|---|---|---|
-| 4 | 4.4m | GPS 오차(1.5m CEP)의 3배 — 측정을 오염시킴 |
-| 8 | 1.14m | 경계선 |
-| **12** | **0.51m** | GPS 오차의 1/3 — 균형점, 실제 비행 waypoint 개수 추천값 |
-| 36 | 0.06m | GPS 오차 순수 측정(ablation)용 — 실제 임무엔 과잉 |
-
-→ MASt3R-SfM 최소 요구 뷰 수(문헌상 객체 중심 sparse-view 6~8장)와도 부합 → **실제 비행은 12 waypoint 권장**.
-
-### 스크립트
-
-`D:\epic\CitySample\scripts\waypoint_gps_error_test.py` (Cosys-AirSim, cosysairsim 파이썬 클라이언트, RPC 포트 47000)
-
-- `--circle`: 연속경로(`moveOnPathAsync`)로 원형 비행, 실제/추정 위치를 실시간 샘플링 → CSV (GPS 오차 정량화용)
-- `--capture`: 각 지점에서 정지(`moveToPositionAsync`) + 중심 오브젝트를 향해 yaw 자동 조준 + 촬영 → `{out_dir}/NNN.png` + `capture_log.csv`(참값/추정 pose, eph/epv 포함) — **MASt3R-SfM 입력용**
-- `--targets <오브젝트명>`: `simGetObjectPose`로 씬 오브젝트(예: `StaticMeshActor_7`) 위치를 자동 조회해 원 중심으로 사용 (UE 에디터 액터 라벨과 내부 `GetName()`이 다를 수 있음 — `--list-objects ".*"` 로 사전 확인 필요)
-- 예: `--capture --targets StaticMeshActor_7 --radius 15 --num-points 18 --out-dir captures_18`
-
-### 현재 상태 / 다음 단계
-
-- [x] GPS 오차 모델 구현 + 검증 (제어 루프에 실제 반영 확인, truth-est 간극 ~2.5m로 정상화)
-- [x] 18장 MASt3R-SfM 정합 서버에서 1회 완료
-- [ ] AirSim `--capture`로 18장 촬영 → 각도 균등 서브샘플링(12/8/6장) → MASt3R-SfM 재실행 → 18장 결과 기준 포즈/포인트클라우드 비교(ICP RMSE, 카메라 등록 성공률)로 최소 waypoint 개수 실측 검증
-- [ ] GPS 오차 몬테카를로 반복(시드 다중화, 30~100회) — waypoint 추종오차의 분포/CEP 추정. 현재 난수 시드가 코드에 고정돼 있어 Python에서 제어 불가 → RPC로 시드 노출 필요(미착수)
-
----
-
-## 11. 실촬영 waypoint 개수 ablation + 서버 MASt3R-SfM 검증 (2026-07-09)
-
-### 촬영 스크립트 전환
-
-커스텀 `waypoint_gps_error_test.py` 대신, 기존 프로젝트 스크립트 `D:\epic\CitySample\test_auto_operate_optimal.py`를 그대로 사용(중복 구현 방지). 카메라(짐벌)는 이미 `CAMERA_PITCH_DEG=-45.0`로 고정 구현되어 있어 고도/반경과 무관하게 45도 하향 촬영됨. `--mode orbit_only`로 원형 궤도 지정 waypoint 수만큼 정지-촬영, 각 프레임에 `vehicle_pose`(ground truth)와 `multirotor_kinematics`(GPS-필터링 추정치)를 함께 JSON으로 기록.
-
-### 고도 드리프트 버그 (발견 + 수정)
-
-- **증상**: 반경10m/고도4m 지정 촬영(`captures_4m_r11`)에서 `vehicle_pose.z`(실제 고도)가 -7.5m → -11m까지 표류. `multirotor_kinematics.position.z`(추정치)는 -4~-4.8m로 정상 표시 — 즉 **드론이 실제로는 명령한 4m보다 훨씬 높이 떠서, 잘못된 추정치를 4m로 보이게 만드는 중**이었음.
-- **원인**: 수평(X/Y)과 동일한 Gauss-Markov GPS 바이어스 모델을 Z축에도 그대로 적용(EpvFinal=2.5). 상관시간(τ=60s)이 촬영 1회 비행시간(~30~40s)보다 길어서, 한 번의 큰 Z바이어스 표본이 비행 내내 거의 고정값으로 유지됨 → 고도유지 제어기가 편향된 추정치를 4m로 맞추려다 실제 고도를 계속 밀어올림. 실기체는 이 문제를 기압계(정확·표류 없음)로 회피하는데, 시뮬레이션은 GPS-Z(가장 나쁜 채널)를 그대로 쓰고 있었음.
-- **수정**: `AirSimSimpleFlightEstimatorGps.hpp`에 `getBaroAltitude()` 추가 — Z 추정치는 GPS Gauss-Markov 바이어스를 완전히 우회하고 매 틱 `true_z + 백색잡음(σ=0.15m)`만 사용. 검증(`captures_4m_r10`): 실제 고도 -4.1~-4.65m로 안정화(±0.1~0.3m), 수평 GPS 오차(추정-실제 간극 1.4~2.9m)는 정상적으로 유지됨.
-
-### MASt3R-SfM 서버 환경 문제 해결
-
-- **증상**: `conda recon3d` 환경에서 실행 시 `ImportError: GLIBCXX_3.4.29 not found`(PIL/Lerc, libstdc++ 구버전) 발생. `LD_LIBRARY_PATH`로 conda 환경의 최신 libstdc++를 우선시키면 PIL은 해결되나 `AttributeError: torch._C has no attribute _OutOfMemoryError`(torch CUDA 확장 ABI 깨짐)로 다른 에러 발생 — PIL과 torch가 서로 다른 libstdc++ 버전을 요구하는 환경 자체 결함.
-- **해결**: `recon3d` 대신 기존에 준비되어 있던 **`venv-mast3r`**(`/home/sdh/Desktop/venvs/venv-mast3r`, python3.10, torch 2.1.2+cu121) 사용 — PIL/torch 동시 임포트 정상 확인. `run_mast3r_sfm.py`는 `/home/sdh/Desktop/models/MAST3R_2/`에 위치.
-- **주의**: sysai3 로그인 셸 `.bashrc`에 문법 오류(`line 3: unexpected token 'fi'`) 있음 — 매 SSH 세션마다 경고 출력되지만 명령 실행 자체엔 영향 없음(작업 범위가 `~/Desktop/` 이하로 제한되어 있어 별도 수정하지 않음).
-
-### Waypoint 개수 ablation 결과 (반경10m/고도4m, `scene_graph=retrieval-20-5` — 프로젝트 표준)
-
-| 데이터셋 | 장수 | 외란 | 매칭 페어 | 포인트 수 |
-|---|---|---|---|---|
-| `captures_4m_r10_n8` | 8 | 있음 | 78쌍 | 650,879 |
-| `captures_4m_r10` | 12 | 있음 | 174쌍 | 752,969 |
-| `captures_4m_r10_n17` | 17 | 있음 | 318쌍 | 1,177,574 |
-| `captures_4m_r10_n17_baseline` | 17 | 없음(바람0, GPS오차~0) | 318쌍 | 1,164,628 |
-
-- retrieval anchor 수(Na=20)가 실험 이미지 수(8~17장)보다 많아, 이 규모에서는 retrieval이 사실상 complete 그래프와 동일하게 동작(초기 `scene_graph=complete`로 돌린 결과와 포인트 수 거의 일치 — 12장 750,305 vs 752,969, 8장 652,179 vs 650,879). 대형 데이터셋(수십~수백 장)에서만 retrieval의 효율 이점이 실제로 발휘될 것으로 예상.
-- 결과 파일(`pointcloud.ply`/`poses.npy`/`focals.npy`) 전부 `C:\Users\손동한\Desktop\mast3r_results\<데이터셋명>[_retrieval]\`로 다운로드 완료 — 로컬에서 CloudCompare로 시각 비교 가능.
-- 다음 단계: 12/8/17장 결과의 포인트클라우드 밀도/노이즈를 GT(시뮬레이션 실제 지오메트리) 대비 정량 비교(ICP RMSE 등)하여 "12개가 균형점"이라는 기하학적 추정을 실측으로 검증할 것.
-
-### settings.json 프리셋 전환 방법
-
-`D:\UE_5.4\Engine\Binaries\Win64\settings.json`이 실제 활성 파일(우선순위: 커맨드라인 > 실행파일 폴더 > 실행 폴더 > `Documents\AirSim\`, `Documents` 경로는 최하위라 무시되기 쉬움 — 주의). `settings_baseline.json`(외란 없음) / `settings_disturbed.json`(바람+GPS 오차) 두 프리셋을 파일로 복사해 스왑하는 방식 사용. 전환 후 UE5 Play를 재시작해야 반영됨(런타임 중 설정 재로드 안 됨).
-
-## normfix 결론 정정 + 핵심 요지 (2026-07-24)
-
-### 정정: "dense MVS+ICP 불필요" 결론은 과장이었음
-| | 전체 CD | notch CD |
-|---|---|---|
-| denseicp768 (dense MVS+ICP) | **2.70cm** ✅ 더 좋음 | 8.0cm |
-| normfix (native, 색로딩 버그 수정) | 3.29~3.34cm | **6.15~6.60cm** ✅ 더 좋음 |
-| normfix + voxelcoarse (TSDF 파라미터 튜닝) | 3.29cm | 6.15cm |
-
-normfix가 실제로 확인한 건 "native prior가 (색 로딩 버그만 고치면) 더 이상 완전히 실패(5.68M 가우시안 폭증·파편화)하지는 않는다"는 것뿐. **전체 표면 정확도는 dense MVS+ICP가 여전히 확실히 우위**(약 20% 더 좋음). normfix가 이긴 건 notch 영역 하나뿐이고 차이도 크지 않음. "dense+ICP 불필요, native로 충분" 식의 결론은 과장이었고 정확히는 "쓸 수는 있지만 dense보다 낫지 않은 대안"으로 정정.
-
-### 핵심 요지 (사용자 지정, 시각 확인 기반 — 수치로는 원인 재해석하지 말 것)
-사용자가 실제 렌더링/메시를 시각적으로 확인한 결과, 남은 오차의 가장 큰 두 요인은:
-1. **표면 반사가 심한 부분의 잘못된 렌더링**
-2. **요철(notch) 부분의 렌더링**
-
-수치 참고(해석 없이 사실만): notch CD는 모든 실험에서 전체 CD보다 항상 나쁨(6~8cm대 vs 2.7~3.3cm대). 반사 관련 정량 지표는 아직 별도로 측정한 바 없음.
-
-앞으로의 실험은 이 두 요인을 사용자가 시각적으로 확인해 우선순위를 판단.
-
-## GS-2M 다음 실험 계획 (2026-07-20 작성, 착수 대기 중)
-
-전제: 서버(sdh@210.110.250.34:8522) GPU가 타 사용자(cbchoi, `river_data` 스크립트)로 90%+ 점유 중이라 착수 보류. 모두 원본 GS-2M(`~/Desktop/models/GS-2M`) 코드는 건드리지 않고 데이터/인자만 바꿔서 실행(공정 비교 원칙 유지).
-
-### 우선순위 순서
-
-1. **native prior + SOR 필터 재학습** [최우선]
-   - native prior(`mast3r_retr_res768/pointcloud.ply`)에서 GT 표면 20cm+ 벗어난 floater(7.2%, ~16만점) SOR 필터로 제거
-   - 필터링 스크립트 작성 → 새 experiments 디렉토리 생성(cameras/images는 normfix와 동일, points3D.ply만 필터링본으로 교체)
-   - 학습: 동일 플래그(`--iterations 30000 --use_opacity_reduce`), 새 포트
-   - 목적: denseicp768(CD 2.70cm)을 넘을 수 있는지 확인 — native의 정확한 중앙값 + 깨끗한 꼬리 조합
-   - 예상 소요: 필터링 10분 + 학습 4~5시간 + 추출/평가 20분
-
-2. **TSDF 후처리 파라미터 튜닝** [가장 쌈, 학습 불필요]
-   - 기존 normfix 학습 결과(`point_cloud/iteration_30000`) 재사용
-   - `render.py --extract_mesh` 재실행하되 num_clusters, voxel_size 등 파라미터 변형 3~5종
-   - 목적: post-cluster 시 raw의 9.6만 클러스터 중 본체 외 잡음을 더 깔끔히 제거 가능한지
-   - 예상 소요: 30~60분(추출만, 학습 없음)
-
-3. **clahe 전처리 + native prior 조합**
-   - 기존 clahe 검증(요철 형상 최고)과 native prior 승자를 조합
-   - clahe 이미지로 MASt3R 재실행(SfM) → normal 필드 추가한 prior ply 생성 → GS-2M 학습
-   - 예상 소요: SfM 30분~1시간 + 학습 4~5시간 + 추출/평가 20분
-
-4. **res1024 + native prior 재평가**
-   - 기존 res1024 기각은 denseicp 파이프라인 기준이었음 — native prior 주인공인 지금 재검토 가치
-   - MASt3R res1024로 재실행 → GS-2M 학습
-   - 예상 소요: SfM 30분~1시간 + 학습 4~6시간 + 추출/평가 20분
-
-5. **clahe 파라미터 스윕** [전처리 추가 실험, 학습 불필요 1차 검증]
-   - 현재 clahe는 clipLimit 2.0 / 8×8 타일 한 세트만 검증됨
-   - clipLimit 3~4, 타일 16×16 등 2~3종 변형으로 이미지 재생성 → MASt3R SfM만 돌려 prior 육안/정량 비교
-   - 승자만 3번(clahe+native 학습)에 반영
-   - 예상 소요: 변형당 SfM 30분~1시간(학습 없음)
-
-6. **Retinex(MSRCR/SSR) 전처리 시험** [전처리 추가 실험]
-   - 조명/반사 성분 분리로 그늘 영역을 들어올림 — 전역 조명 불균형에 CLAHE보다 강할 수 있음
-   - OpenCV+numpy로 전처리 스크립트 작성 → MASt3R SfM → prior 비교(1차는 학습 없이 판별)
-   - 유망하면 GS-2M 학습까지 진행
-   - 예상 소요: 스크립트 30분 + SfM 30분~1시간
-
-(보류 후보, 5·6번 결과 보고 결정: clahe+bilateral/NLM denoise 조합, shadow-region 국소 보정, 약한 unsharp mask)
-
-### 전체 예상 시간(순차, GPU 단독 기준)
-- 1~4번: 약 20~25시간(학습만 16~24시간 차지)
-- 5~6번: 1차 검증(SfM만)은 각 1시간 내외 추가
-
-### 착수 조건
-서버 GPU 점유 상황 재확인 후 시작. 확인 명령: `nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv` / `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv`
