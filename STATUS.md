@@ -11,6 +11,7 @@
 - **사용자가 시각 확인한 핵심 병목 두 가지**: ① 표면 반사가 심한 부분의 잘못된 렌더링, ② 요철(notch) 부분의 렌더링 — 수치로 원인을 재해석하지 말 것
 - **진행 중**: 서버 GPU가 타 사용자(cbchoi) 점유로 학습 필요 실험(native+SOR, clahe+native 조합) 대기 큐(`~/Desktop/queue_task1_task3.sh`)에 등록, GPU 한가해지면 자동 시작
 - **완료**: TSDF 파라미터 스윕(voxelcoarse 승, PART A 최하단), clahe 파라미터 스윕 + retinex prior 정량 비교(둘 다 native 원본보다 prior 자체 정확도는 낮음 — PART A 최하단)
+- **완료**: 로컬 다운로드 57개 ply 전체 재평가(수치 + 사용자 시각평가 병기, PART A "57개 ply 전체 재평가" 절 및 `4m_old_results/전체_재평가_2026-07-24.md`)
 
 **결과 파일**: 서버 실험 디렉토리는 `sysai3:~/Desktop/data/experiments/real_test_4m_old__*`. 로컬 다운로드본은 `C:\Users\sdh97\Desktop\4m_old_results\1_final\`(메시), `\5_prior_점구름\`(prior 점군).
 
@@ -90,6 +91,21 @@ normfix가 실제로 확인한 건 "native prior가 (색 로딩 버그만 고치
 
 앞으로의 실험은 이 두 요인을 사용자가 시각적으로 확인해 우선순위를 판단.
 
+## 57개 ply 전체 재평가 — 수치 + 사용자 시각평가 (2026-07-24)
+
+로컬 다운로드본 57개(`C:\Users\sdh97\Desktop\4m_old_results\`) 전체를 대상으로, 수치(CD/notch CD/F-score, 재사용 39개 + 신규평가 7개 + 평가불가 11개)와 **사용자가 파일을 직접 열어 확인한 시각평가**를 나란히 정리. 전체 표: `4m_old_results/전체_재평가_2026-07-24.md`.
+
+**수치 요약**: 재사용 39개(기존 README/STATUS 기록), 신규평가 7개(5_prior_점구름의 point cloud, `eval_pointcloud_filter_quality.py`로 GT crop CD 측정 — retr_raw 2.678cm, retr_k1.4 2.605cm, swin_raw 4.006cm, swin_k1.4 3.917cm, prep_prior_gamma 2.780cm, prep_prior_edge 11.055cm, prior_res1024는 정합 실패), 평가불가 11개(raw 파편화 메시, boxcrop 파생본, poses 부재).
+
+**사용자 시각평가 원문 그대로 (해석 없이 기록만 — 반복 등장한 표현)**:
+- 메시 결과 다수에서 "요철부분 실패/노이즈", "모서리 울퉁불퉁/노이즈" 반복 지적
+- `denseicp768_D2`: "요철부분 실패, 그림자부분에 파란색조각, 물체 면 부분에 점같이 렌더링 안된게 있음"
+- `mast3r_res768_pointcloud`(=native prior): "요철부분 그림자부분 구분어렵고 복원물체 선명도가 매우 떨어짐"
+- retrieval/swin 4콤보 메시 다수: "물체소실" → "지면 재질로 렌더링"(재질감으로 대체 표현)
+- prior 점구름 계열: retinex/gamma "복원물체 선명도가 떨어지고 요철 그림자 노이즈 적어짐, 밝기(명도) 증가", clahe 계열 "물체의 노이즈가 전체적으로 뒤덮힘", edge "검은색화면에 엣지복원 실패, 뭉쳐짐"
+- `mast3rprior_fixed`/`nopior768`/`unionicp` 계열: 사용자가 "정합실패"로 일괄 표시
+
+세부 파일별 코멘트는 `전체_재평가_2026-07-24.md`의 "시각평가" 열 참고. 이 항목들은 사용자가 직접 관찰한 사실이며, 원인(왜 그런지)에 대한 해석은 추가하지 않음.
 
 ## 최종 시뮬레이션 환경 검증 실험 계획 (2026-06-28)
 
