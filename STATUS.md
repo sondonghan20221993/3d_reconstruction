@@ -113,9 +113,10 @@ normfix가 실제로 확인한 건 "native prior가 (색 로딩 버그만 고치
 2. **최저 full CD 3개가 전부 시각 불합격 — 수치 오탐.** `unionicp`(2.26~2.36cm, 전체 최저)→정합실패 / `4_retrieval20-5_filtered_k1.4`(2.72cm)→"지면 재질로 렌더링" / `denseicp768`(2.70cm)→요철실패. 반대로 CD가 더 나쁜 `1_swin5_raw`(3.73cm)만 물체 형상 유지. 물체가 지면으로 붕괴/병합되면 점이 GT 지면 근처라 CD가 낮아지는 구조 → ATE·notch·육안 검증 없는 낮은 CD는 거짓 양성.
 3. **edge 전처리는 두 파이프라인 모두 파탄.** mesh `prep_mesh_edge` 11.1cm(메시 최악)·prior `prep_prior_edge` 11.055cm(점군 최악), 시각도 각각 "요철 실패"/"엣지복원 실패, 뭉쳐짐" → 폐기 대상.
 4. **retr vs swin prior 수치 우열 역전 가능.** `retr_k1.4` CD 2.605cm(prior 최상)·F@10 0.985인데 poses ATE 9.10cm·시각 "요철 노이즈"; `swin_k1.4` CD 3.917cm·ATE 1.86cm·시각 "요철 적은 노이즈". retr의 낮은 CD는 5배 느슨한 정합 위 값 → 헤드라인 CD는 retr 우위지만 정합+육안은 swin 우위.
-5. **native/retinex 역설.** `native(res768)` CD 3.83cm(그룹 최저)인데 "선명도 매우 떨어짐", `retinex` CD 4.00cm(더 나쁨)인데 "요철 그림자 노이즈 적어짐+밝기 증가" — CD +0.17cm 손해로 관심영역 지각 개선. clahe 계열은 CD도(4.51→5.12) 시각도 단조 악화(일치).
+5. **native/retinex 역설.** `native(res768)` CD 3.83cm(그룹 최저)인데 "선명도 매우 떨어짐", `retinex` CD 4.00cm(더 나쁨)인데 "요철 그림자 노이즈 적어짐+밝기 증가" — CD +0.17cm 손해로 관심영역 지각 개선.
+6. **clahe = 요철 노이즈를 사실상 지운 유일한 전처리(사용자 직접 관찰, 수치엔 안 잡힘).** 전체 케이스 중 clahe만 요철 노이즈를 확실히 제거. 강도 구분 존재 — 약한 clahe(`prep_prior_clahe`·`prep_mesh_clahe`)가 요철 제거 케이스, 강한 감마 변형(`clahe_c35g8`·`clahe_c20g16`, CD 4.51→5.12)은 "물체 노이즈 전체 뒤덮힘"으로 과함. 이 요철 제거 효과는 full CD(clahe가 native보다 나쁨)에 안 잡힘 → clahe를 수치상 최악으로 본 판단은 full CD만 본 오판으로 정정. task3(clahe+native)은 유지가 맞음.
 
-**핵심**: 1·2번이 "수치만으로 못 보는 것"의 정체 — (a) full CD가 놓치는 요철 실패는 notch CD에, (b) 최저 CD 항목이 물체 붕괴/정합실패. full CD 단일 지표로는 순위가 거꾸로 나옴.
+**핵심**: 1·2·6번이 "수치만으로 못 보는 것"의 정체 — (a) full CD가 놓치는 요철 실패는 notch CD에, (b) 최저 CD 항목이 물체 붕괴/정합실패, (c) clahe의 요철 노이즈 제거는 full CD에 안 잡힘. full CD 단일 지표로는 순위가 거꾸로 나옴.
 
 ## 최종 시뮬레이션 환경 검증 실험 계획 (2026-06-28)
 
