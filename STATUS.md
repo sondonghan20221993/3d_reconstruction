@@ -2133,3 +2133,53 @@ MASt3R는 이미지를 **512px로 리사이즈**하여 처리하고 focal을 그
 ### settings.json 프리셋 전환 방법
 
 `D:\UE_5.4\Engine\Binaries\Win64\settings.json`이 실제 활성 파일(우선순위: 커맨드라인 > 실행파일 폴더 > 실행 폴더 > `Documents\AirSim\`, `Documents` 경로는 최하위라 무시되기 쉬움 — 주의). `settings_baseline.json`(외란 없음) / `settings_disturbed.json`(바람+GPS 오차) 두 프리셋을 파일로 복사해 스왑하는 방식 사용. 전환 후 UE5 Play를 재시작해야 반영됨(런타임 중 설정 재로드 안 됨).
+
+## GS-2M 다음 실험 계획 (2026-07-20 작성, 착수 대기 중)
+
+전제: 서버(sdh@210.110.250.34:8522) GPU가 타 사용자(cbchoi, `river_data` 스크립트)로 90%+ 점유 중이라 착수 보류. 모두 원본 GS-2M(`~/Desktop/models/GS-2M`) 코드는 건드리지 않고 데이터/인자만 바꿔서 실행(공정 비교 원칙 유지).
+
+### 우선순위 순서
+
+1. **native prior + SOR 필터 재학습** [최우선]
+   - native prior(`mast3r_retr_res768/pointcloud.ply`)에서 GT 표면 20cm+ 벗어난 floater(7.2%, ~16만점) SOR 필터로 제거
+   - 필터링 스크립트 작성 → 새 experiments 디렉토리 생성(cameras/images는 normfix와 동일, points3D.ply만 필터링본으로 교체)
+   - 학습: 동일 플래그(`--iterations 30000 --use_opacity_reduce`), 새 포트
+   - 목적: denseicp768(CD 2.70cm)을 넘을 수 있는지 확인 — native의 정확한 중앙값 + 깨끗한 꼬리 조합
+   - 예상 소요: 필터링 10분 + 학습 4~5시간 + 추출/평가 20분
+
+2. **TSDF 후처리 파라미터 튜닝** [가장 쌈, 학습 불필요]
+   - 기존 normfix 학습 결과(`point_cloud/iteration_30000`) 재사용
+   - `render.py --extract_mesh` 재실행하되 num_clusters, voxel_size 등 파라미터 변형 3~5종
+   - 목적: post-cluster 시 raw의 9.6만 클러스터 중 본체 외 잡음을 더 깔끔히 제거 가능한지
+   - 예상 소요: 30~60분(추출만, 학습 없음)
+
+3. **clahe 전처리 + native prior 조합**
+   - 기존 clahe 검증(요철 형상 최고)과 native prior 승자를 조합
+   - clahe 이미지로 MASt3R 재실행(SfM) → normal 필드 추가한 prior ply 생성 → GS-2M 학습
+   - 예상 소요: SfM 30분~1시간 + 학습 4~5시간 + 추출/평가 20분
+
+4. **res1024 + native prior 재평가**
+   - 기존 res1024 기각은 denseicp 파이프라인 기준이었음 — native prior 주인공인 지금 재검토 가치
+   - MASt3R res1024로 재실행 → GS-2M 학습
+   - 예상 소요: SfM 30분~1시간 + 학습 4~6시간 + 추출/평가 20분
+
+5. **clahe 파라미터 스윕** [전처리 추가 실험, 학습 불필요 1차 검증]
+   - 현재 clahe는 clipLimit 2.0 / 8×8 타일 한 세트만 검증됨
+   - clipLimit 3~4, 타일 16×16 등 2~3종 변형으로 이미지 재생성 → MASt3R SfM만 돌려 prior 육안/정량 비교
+   - 승자만 3번(clahe+native 학습)에 반영
+   - 예상 소요: 변형당 SfM 30분~1시간(학습 없음)
+
+6. **Retinex(MSRCR/SSR) 전처리 시험** [전처리 추가 실험]
+   - 조명/반사 성분 분리로 그늘 영역을 들어올림 — 전역 조명 불균형에 CLAHE보다 강할 수 있음
+   - OpenCV+numpy로 전처리 스크립트 작성 → MASt3R SfM → prior 비교(1차는 학습 없이 판별)
+   - 유망하면 GS-2M 학습까지 진행
+   - 예상 소요: 스크립트 30분 + SfM 30분~1시간
+
+(보류 후보, 5·6번 결과 보고 결정: clahe+bilateral/NLM denoise 조합, shadow-region 국소 보정, 약한 unsharp mask)
+
+### 전체 예상 시간(순차, GPU 단독 기준)
+- 1~4번: 약 20~25시간(학습만 16~24시간 차지)
+- 5~6번: 1차 검증(SfM만)은 각 1시간 내외 추가
+
+### 착수 조건
+서버 GPU 점유 상황 재확인 후 시작. 확인 명령: `nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv` / `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv`
