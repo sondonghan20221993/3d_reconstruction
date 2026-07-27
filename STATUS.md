@@ -9,13 +9,21 @@
 - **최고 결과**: normfix + voxelcoarse(TSDF 파라미터 튜닝) — 전체 CD 3.29cm, F@10cm 0.8827, notch CD 6.15cm
 - **정정된 결론**: dense MVS+ICP(denseicp768, CD 2.70cm)가 전체 표면 정확도에서 여전히 최선. native prior(normfix)는 색 로딩 버그만 고치면 더 이상 완전히 실패하지 않지만, dense+ICP보다 낫진 않음 — notch 영역만 근소 우위. ("dense+ICP 불필요"는 과장된 결론이었음, 상세는 PART A 하단)
 - **사용자가 시각 확인한 핵심 병목 두 가지**: ① 표면 반사가 심한 부분의 잘못된 렌더링, ② 요철(notch) 부분의 렌더링 — 수치로 원인을 재해석하지 말 것
-- **진행 중**: 서버 GPU가 타 사용자(cbchoi) 점유로 학습 필요 실험(native+SOR, clahe+native 조합) 대기 큐(`~/Desktop/queue_task1_task3.sh`)에 등록, GPU 한가해지면 자동 시작
+- **완료 (2026-07-25)**: native+SOR(task1, full CD 3.29cm/notch 6.06cm), clahe+native(task3, full CD 4.07cm/notch 6.37cm) — 둘 다 최초 실행은 환경/스케일 버그로 실패했다가 원인 수정 후 재실행 성공. 결과 다운로드+사용자 시각평가 완료(`4m_old_results/task1_task3_new/`, `전체_재평가_2026-07-24.md` §6): task1 "반사부분 실패, 요철 실패" / task3 "반사광 노이즈, 요철 초초미세 노이즈(성공상태 가까움)" — **요철은 task3(clahe단독)가 이 시점까지 최고**
+- **완료 (2026-07-26)**: "반사 문제 없던 전처리 + 요철 좋았던 clahe" 조합 4종 실험 — case1(retinex+clahe), case2(1D gamma+clahe), case3(z-gamma+clahe, depth 불연속 기반), case4(2D-gamma+clahe, 국소 조명지도 기반). 결과+시각평가 완료(`4m_old_results/case1234_new/`, `전체_재평가_2026-07-24.md` §7):
+  - **case1(retinex+clahe) — 현재까지 요철 최고**: post "초미세 노이즈, 성공 가까움"(task3의 "초초미세"와 거의 동급) + **반사 지적 없음**(case2/4는 여전히 "반사부분 노이즈" 남음) → 지금까지 나온 조합 중 반사+요철 둘 다 개선한 유일한 후보
+  - case2(gamma+clahe): 요철 적은 노이즈, 반사 노이즈 있음. full CD 2.85cm/F@10cm 0.9537로 수치는 최고지만 시각은 case1보다 못함(§6번 교훈 재확인 — 수치 1위가 시각 1위는 아님)
+  - **case3(z-gamma+clahe) — 폐기**: ATE 47.11cm(다른 케이스 대비 25배)로 정합 실패. post 메시가 CloudCompare에서 로드는 되나 화면에 아무것도 안 보임, raw도 사용자가 "정합실패"로 판정. z-gamma 아이디어(prior point cloud를 카메라로 재투영해 depth map 생성 → depth 불연속으로 요철 검출해 gamma 세게)는 최초 시도 시 focal 스케일백 버그(1452px, 이 프로젝트에서 여러 번 재발한 그 버그)로 한 번 실패해 수정 후 재실행했음에도 이번엔 SfM 매칭 자체가 이 전처리로 인해 흔들린 것으로 보임 — depth-aware 전처리 자체가 이 데이터셋엔 안 맞을 가능성
+  - case4(2D-gamma+clahe): 요철 적은 노이즈, 반사 노이즈 있음. case2와 시각적으로 비슷한 수준
+  - **다음 후보로 거론(미착수)**: 2D depth-aware shadow removal(homomorphic filtering, DSM+태양각 기반) — case3 실패로 depth 활용은 신중히 재검토 필요
 - **완료**: TSDF 파라미터 스윕(voxelcoarse 승, PART A 최하단), clahe 파라미터 스윕 + retinex prior 정량 비교(둘 다 native 원본보다 prior 자체 정확도는 낮음 — PART A 최하단)
 - **완료**: 로컬 다운로드 57개 ply 전체 재평가(수치 + 사용자 시각평가 병기, PART A "57개 ply 전체 재평가" 절 및 `4m_old_results/전체_재평가_2026-07-24.md`)
 
 **결과 파일**: 서버 실험 디렉토리는 `sysai3:~/Desktop/data/experiments/real_test_4m_old__*`. 로컬 다운로드본은 `C:\Users\sdh97\Desktop\4m_old_results\1_final\`(메시), `\5_prior_점구름\`(prior 점군).
 
 **보조 트랙**: 실제 드론 데이터(PART B), 초기 시뮬레이션 real_test/blue_1(PART C, 아카이브).
+
+**신규 (2026-07-27 착수)**: 시뮬레이션에서 검증된 개선안(전처리/prior/필터)을 실제 5m_1 드론 데이터에 하나씩 단일 변수로 적용 — 계획 및 진행 로그는 `real_data_5m1_improvement_plan.md` 참고. GT 없어 육안 비교만 가능.
 
 ---
 
@@ -27,12 +35,10 @@
 
 ### 우선순위 순서
 
-1. **native prior + SOR 필터 재학습** [최우선] — 🔄 서버 큐 대기 중(GPU 확보되면 자동 시작)
+1. **native prior + SOR 필터 재학습** [최우선] — ✅ 완료 (2026-07-25). full CD 3.29cm / boxcrop 3.52cm / notch CD 6.06cm / F@10cm 0.8818 — normfix(3.34/6.60)보다 소폭 우세, denseicp768(2.70cm)엔 못 미침. 결과: `4m_old_results/task1_task3_new/`, 상세는 `전체_재평가_2026-07-24.md` §6. 사용자 시각평가 대기 중.
+   - (최초 시도 실패 원인: conda `gs2m` 환경의 open3d/PIL이 `GLIBCXX_3.4.29` 충돌로 필터 스크립트가 죽고, 그 상태로 point cloud 0개인 채 학습이 강행돼 CUDA 에러로 즉시 크래시. `venv-gs2m`(open3d 정상 동작 확인됨)으로 전체 스크립트 환경을 바꿔서 재실행해 해결.)
    - native prior(`mast3r_retr_res768/pointcloud.ply`)에서 GT 표면 20cm+ 벗어난 floater(7.2%, ~16만점) SOR 필터로 제거
-   - 필터링 스크립트 작성 → 새 experiments 디렉토리 생성(cameras/images는 normfix와 동일, points3D.ply만 필터링본으로 교체)
-   - 학습: 동일 플래그(`--iterations 30000 --use_opacity_reduce`), 새 포트
-   - 목적: denseicp768(CD 2.70cm)을 넘을 수 있는지 확인 — native의 정확한 중앙값 + 깨끗한 꼬리 조합
-   - 예상 소요: 필터링 10분 + 학습 4~5시간 + 추출/평가 20분
+   - 학습: 동일 플래그(`--iterations 30000 --use_opacity_reduce`)
 
 2. **TSDF 후처리 파라미터 튜닝** [가장 쌈, 학습 불필요] — ✅ 완료. voxelcoarse(voxel_size=0.008)가 신규 최고 기록(CD 3.29cm, notch 6.15cm)
    - 기존 normfix 학습 결과(`point_cloud/iteration_30000`) 재사용
@@ -40,10 +46,9 @@
    - 목적: post-cluster 시 raw의 9.6만 클러스터 중 본체 외 잡음을 더 깔끔히 제거 가능한지
    - 예상 소요: 30~60분(추출만, 학습 없음)
 
-3. **clahe 전처리 + native prior 조합** — 🔄 서버 큐 대기 중(1번 뒤이어 자동 실행 예정). 단, 5번 결과상 clahe가 prior 정확도 자체는 native보다 낮아 재고 필요
+3. **clahe 전처리 + native prior 조합** — ✅ 완료 (2026-07-25). full CD 4.07cm / boxcrop 4.43cm / notch CD 6.37cm / F@10cm 0.7995 — full CD는 normfix보다 열세지만 notch CD는 소폭 우세(6.37 vs 6.60). §6 교훈(clahe는 요철 개선 효과가 full CD에 안 잡힘)을 감안하면 수치만으로 기각 금지 — 사용자 시각평가 필요. 결과: `4m_old_results/task1_task3_new/`, 상세는 `전체_재평가_2026-07-24.md` §6.
+   - (최초 시도 실패 원인: `build_colmap_4mold_resbase.py`를 BASE=768로 호출했으나 clahe prior는 실제 512 해상도 산출물이라 focal이 651px로 잘못 계산돼 `assert focal>700`에서 즉시 죽음. BASE=512로 수정해 해결 — 7/5 문서화된 것과 같은 유형의 focal 스케일백 버그.)
    - 기존 clahe 검증(요철 형상 최고)과 native prior 승자를 조합
-   - clahe 이미지로 MASt3R 재실행(SfM) → normal 필드 추가한 prior ply 생성 → GS-2M 학습
-   - 예상 소요: SfM 30분~1시간 + 학습 4~5시간 + 추출/평가 20분
 
 4. **res1024 + native prior 재평가**
    - 기존 res1024 기각은 denseicp 파이프라인 기준이었음 — native prior 주인공인 지금 재검토 가치

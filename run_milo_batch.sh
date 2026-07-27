@@ -45,6 +45,9 @@ for i in "${!JOBS[@]}"; do
     echo ""
 done
 
+# 모든 작업 완료 후 세션 자동 종료 (좀비 세션 방지)
+tmux send-keys -t $SESSION "echo '[전체 완료] tmux 세션 자동 종료' && tmux kill-session -t $SESSION" C-m
+
 echo "=========================================="
 echo "모든 작업이 tmux '$SESSION'에서 순차 실행 중"
 echo ""
