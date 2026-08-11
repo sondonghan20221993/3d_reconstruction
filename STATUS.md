@@ -26,6 +26,8 @@
 
 **신규 (2026-07-27 착수)**: 시뮬레이션에서 검증된 개선안(전처리/prior/필터)을 실제 5m_1 드론 데이터에 하나씩 단일 변수로 적용 — 계획 및 진행 로그는 `real_data_5m1_improvement_plan.md` 참고. GT 없어 육안 비교만 가능.
 
+**신규 트랙 (2026-08-06~08-10, PART F)**: 실제 PX4 비행 로그의 하강 궤적을 합성 환경에서 재현해 MASt3R-SfM/SLAM 복원 정확도 평가. **궤도 촬영이 아니라 하강 단일 통과 궤적**이라 PART A~C와 촬영 구도가 근본적으로 다름 — 교훈 혼용 금지. 현재까지: SfM은 10개 데이터셋 전부 프레임 100% 등록 성공, SLAM은 16건 중 11건이 키프레임 1개로 실패(원인 3종 분리 완료, PART F.3). **ATE 절대값은 두 평가 경로가 상충해 보류 중**(PART F.4) — 평가 스크립트 일원화가 선행 과제.
+
 ---
 
 # PART A. GS-2M 4m 시뮬레이션 (메인 트랙, 최신)
@@ -2286,3 +2288,148 @@ Gaussian splatting을 시도한 이유도 바로 이 때문이었으나, photome
 
 ---
 
+
+# PART F. 로켓/캔샛 하강 궤적 재현 & SfM/SLAM 평가 (2026-08-06~08-10)
+
+> **기존 트랙과 다른 촬영 구도** — PART A~C는 대상을 둘러싸는 궤도(orbit) 촬영이다.
+> 이 트랙은 **하강하면서 단 한 번 통과하는 궤적**이라 루프 클로저가 없고 기선/거리 비가
+> 0.0054~0.0973로 극단적으로 작다. PART A~C의 교훈을 그대로 끌어오지 말 것.
+
+## F.1 목적과 데이터 생성 조건
+
+실제 비행 로그(PX4 `log_22_2026-8-6-15-04-00.ulg`, 2026-08-06 로켓/캔샛 하강)의 카메라 포즈를
+합성 환경에서 재현해 프레임을 만들고, MASt3R-SfM / MASt3R-SLAM 복원 결과를 GT 포즈와 비교했다.
+GT가 있는 트랙이므로 포즈 정확도 정량 비교가 가능하다.
+
+| 항목 | 값 |
+|---|---|
+| GT 궤적 | PX4 `vehicle_local_position` / `vehicle_attitude` (NED), EKF 리셋 보정 적용 |
+| 평가 구간 | t = 117.4 ~ 215.8 s (요청 112~240 s 중 대지고도 35 m 이상) |
+| 고도 범위 (AGL) | 35 ~ 348 m |
+| 기선/거리 비 | 0.0054 ~ 0.0973 |
+| 렌더 | 1920×1080, 수평 FOV 90° (fx = 960 px) |
+| SfM | MASt3R-SfM, 512 px 입력, `scene_graph=swin-5-noncyclic`, `shared_intrinsics=true` |
+| SLAM | MASt3R-SLAM |
+| GPU | A6000 (기존 트랙과 동일) |
+
+변량은 **카메라 피치**(-45° / -90°)와 **지형**(city = 고층 빌딩 밀집, forest = 수목,
+ground = 개활지) 두 축. 여기에 어안 왜곡(`fish`)과 그 역보정(`undist`) 변형이 붙는다.
+`cap45`/`cap90`은 city 계열의 디렉터리 이름이다(문서에 따라 `city_45`/`city_90`으로도 표기됨).
+
+## F.2 SfM 실행 실적 — 전 케이스 등록 성공
+
+`~/Desktop/rocket_eval_captures/{name}_out/mast3r/run_stats.json` 10건 전수. 입력 프레임을
+100% 등록하는 데는 모두 성공했다(정확도는 별개, F.4 참고).
+
+| 데이터셋 | 프레임 | 쌍 | 정렬 시간 | 피크 VRAM | 산출 점 수 |
+|---|---:|---:|---:|---:|---:|
+| cap45 | 120 | 1170 | 478.5 s | 4.90 GB | 4,169,687 |
+| cap90 | 120 | 1170 | 406.2 s | 5.84 GB | 3,558,608 |
+| forest45 | 120 | 1170 | 477.4 s | 4.83 GB | 2,106,349 |
+| forest90 | 120 | 1170 | 667.5 s | 5.59 GB | 2,673,748 |
+| ground45 | 120 | 1170 | 826.8 s | 5.29 GB | 585,535 |
+| ground90 | 120 | 1170 | 800.9 s | 5.78 GB | 753,914 |
+| city90fish | 120 | 1170 | 659.7 s | 6.20 GB | 578,222 |
+| city90undist | 120 | 1170 | 431.2 s | 6.23 GB | 1,531,573 |
+| forest45fish | 120 | 1170 | 594.2 s | 5.70 GB | 627,980 |
+| forest90stable | 80 | 770 | 300.2 s | 4.66 GB | 1,775,544 |
+
+- **메모리가 아니라 시간이 제약이다.** 피크 VRAM 최대치(6.23 GB)도 A6000 49 GB의 13% 이하다.
+  배치를 키워 시간을 줄일 여지가 남아 있다.
+- **같은 120프레임/1170쌍인데 정렬 시간이 406 s ~ 827 s로 2배 이상 벌어진다.** 텍스처가 빈약한
+  개활지(ground)에서 수렴이 느리다. 프레임 수만으로 처리 시간을 예측하면 안 된다.
+- **산출 점 수는 장면에 따라 7배 차이**(578K ~ 4.17M). 점 수를 품질 지표로 단독 사용 금지 —
+  PART A의 "수치 1위가 시각 1위는 아니다" 교훈과 같은 종류의 함정이다.
+
+## F.3 SLAM 트래킹 성립 여부 — 16건 중 11건 실패
+
+`~/Desktop/MASt3R-SLAM/logs/{name}/frames.txt` 줄 수(= 생성 키프레임 수) 전수.
+입력은 120프레임(`_stable` 계열은 t≥155 s 구간 80프레임).
+
+| 데이터셋 | 키프레임 | 판정 |
+|---|---:|---|
+| forest45_stable_relaxed | 33 | ✅ |
+| cap45 (city, -45°) | 20 | ✅ |
+| cap90 (city, -90°) | 14 | ✅ |
+| forest45_stable | 12 | ✅ |
+| forest90_stable | 11 | ✅ |
+| forest45 / forest90 (전 구간) | 1 / 1 | ❌ |
+| ground45 / ground90 | 1 / 1 | ❌ |
+| ground45_relaxed / ground90_relaxed | 1 / 1 | ❌ |
+| ground45_stable_relaxed / ground90_stable_relaxed | 1 / 1 | ❌ |
+| city90fish / city90undist / forest45fish | 1 / 1 / 1 | ❌ |
+
+키프레임 1개는 **결과가 나쁜 게 아니라 결과가 없는 상태**다. GT와의 공통 프레임이 3개 미만이라
+Sim(3) 정렬 자체가 성립하지 않아 ATE·회전오차를 산출할 수 없다. 실패 원인은 셋으로 갈리고,
+각각 대응이 다르다.
+
+**① 입력 구간 문제 (파이프라인 정상, 입력이 부적합)**
+궤적 초반 약 40프레임(t=112~155 s)은 낙하산 전개 직후 기체가 격렬히 회전(각속도 ~20 rad/s,
+직립 기준 최대 155° 이탈)해 동체 장착 카메라가 대부분 하늘을 향한다. 이 구간을 잘라낸
+`_stable` 계열은 forest에서 **실패(1 kf) → 성립(11~12 kf)** 으로 뒤집혔고, 매칭 조건을 완화한
+`forest45_stable_relaxed`(`reloc.min_match_frac 0.3→0.1`, `strict True→False`)는 33 kf까지 올랐다.
+→ **프레임 순서 보존만으로는 부족하고, 트래킹 가능 구간을 판별해 잘라내는 전처리가 필요하다.**
+
+**② 테스트 환경 제약 (파이프라인 무관)**
+ground 지형은 구간을 자르고 조건을 완화해도 4개 변형 전부 1 kf에서 멈췄다. 지형 텍스처가
+완전히 반복되는 타일 패턴이라 특징점 매칭이 원천적으로 불가능하다(시각 확인함).
+→ **합성 지형 머티리얼의 한계이므로 ground 실패를 파이프라인 결함으로 계상하면 안 된다.**
+근본 해결은 지형 텍스처 교체뿐이다.
+
+**③ 렌즈 모델 불일치**
+어안(`fish`)과 그 역보정(`undist`) 변형은 전부 실패. 이 합성 어안은 진짜 어안 렌더가 아니라
+광각을 흉내낸 재투영이고(지평선이 직선으로 나옴), MASt3R-SLAM의 `Intrinsics.from_calib`도
+OpenCV radial-tangential 왜곡만 지원하며 `cv2.fisheye` 모델이 없다.
+→ **실촬영 어안 영상을 투입하려면 별도 dewarp 단계가 선행되어야 한다.**
+
+## F.4 ⚠️ ATE 수치는 아직 확정하지 말 것 — 두 평가 경로가 상충
+
+포즈 정확도 절대값은 **이 문서에 결론으로 싣지 않는다.** 이유 둘.
+
+**(1) 평가 지형이 더미다.** 서버 평가 리포트(`{name}_out/eval/report.md`)가 지형을 `fractal`
+더미 데이터로 명시하고, 실제 정사영상/DSM으로 교체하면 수치가 달라진다고 스스로 경고한다.
+
+**(2) 같은 데이터셋에 대해 두 평가 경로가 다른 값을 낸다.**
+
+| 데이터셋 | 평가 A (작업 기록 `mem.md`) | 평가 B (서버 `eval/pose_metrics.json`, 8/10 22:41) |
+|---|---|---|
+| city90undist SfM | ATE 53.01 m / 회전 11.73° | ATE 34.05 m / 회전 median 102.5° |
+| city90fish SfM | ATE 40.68 m / 회전 30.46° | ATE 31.06 m / 회전 median 102.2° |
+
+ATE도 다르지만 회전오차가 한 자릿수 대 100° 대로 갈린다. 카메라 축 규약(FRD ↔ OpenCV) 처리
+차이가 유력하나, **평가 A를 생성한 `eval_pose_accuracy.py`가 임시 폴더에 있다가 소실되어
+재현이 불가능**해 어느 쪽이 옳은지 판정하지 못했다.
+
+→ **다음에 할 일**: 축 규약과 정렬 방식(Sim(3) Umeyama)을 명시한 **단일 평가 스크립트를 이
+저장소에 포함**시키고, 그 출력만 근거로 인정한다. 실지형 교체 후 재측정하기 전까지 절대값
+비교는 보류.
+
+참고로 작업 기록에 "SfM 300~594 s, VRAM 4.66~5.70 GB"로 적혀 있던 실행 실적도 실제보다
+좁았다(실측 최대 826.8 s / 6.23 GB, F.2 표). 요약 수치는 원본 `run_stats.json`에서 재확인할 것.
+
+## F.5 미완결
+
+- **`forest90stable` SLAM 미실행** — 8/10 16:30에 SfM(Step 4)까지 끝나고 `poses.json` /
+  `points.ply`(1,775,544점)는 저장됐으나 SLAM 단계 로그가 없고 `ALL_DONE_FOREST90STABLE`
+  마커도 없다. `MASt3R-SLAM/logs/`에도 항목 없음. 크래시가 아니라 중단으로 보임.
+  (F.3 표의 `forest90_stable` 11 kf는 13:59에 돌린 **다른 디렉터리** `forest90_out_stable/`
+  결과이므로 혼동 금지)
+- **ground 지형 텍스처 교체** — ②의 근본 해결. 미착수.
+- **평가 스크립트 일원화** — F.4. 미착수.
+
+## F.6 서버 산출물 위치
+
+```
+~/Desktop/rocket_eval_captures/
+  config_{cap45,cap90,ground45,ground90,forest45,forest90,
+          city90fish,city90undist,forest45fish,forest90stable}.yaml
+  {name}_out/render/frames/*.png          렌더 프레임
+  {name}_out/mast3r/{poses.json,points.ply,run_stats.json}
+  {city90fish,city90undist}_out/eval/     pose_metrics.json, cloud_metrics.json, report.md
+  {ground45,ground90,forest45,forest90}_out_stable/   t≥155 s 서브셋(프레임 40-119 → 0000-0079)
+  logs/  sfm_*.log, slam_*.log, driver_*.log, ALL_DONE_*
+~/Desktop/MASt3R-SLAM/logs/{name}/{frames.txt,frames.ply}
+```
+
+> 합성 렌더라 모션블러·롤링셔터가 실제 카메라와 다르다. 이 결과를 실촬영 예상 성능으로
+> 그대로 일반화하지 말 것.
